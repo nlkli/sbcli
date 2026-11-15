@@ -20,7 +20,7 @@ fn main() -> Result<()> {
     for opt in args.link_converter.iter() {
         if opt.is_from {
             let file = std::fs::File::open(&opt.src)?;
-            let outbounds: Vec<models::AnyOutbound> = serde_json::from_reader(file)?;
+            let mut outbounds: Vec<models::AnyOutbound> = serde_json::from_reader(file)?;
 
             let mut out: Box<dyn Write> = if let Some(ref dst) = opt.dst {
                 Box::new(std::fs::File::create(dst)?)
@@ -28,7 +28,11 @@ fn main() -> Result<()> {
                 Box::new(std::io::stdout())
             };
 
-            for (n, o) in outbounds.iter().enumerate() {
+            for (n, o) in outbounds.iter_mut().enumerate() {
+                if args.uuid_tag {
+                    let uid = uuid::Uuid::new_v4();
+                    *o.tag_mut() = uid.to_string();
+                }
                 match link::any_outbound_to_link(o) {
                     Ok(l) => writeln!(out, "{l}")?,
                     Err(err) => eprintln!("#{n} {err}"),
@@ -43,7 +47,13 @@ fn main() -> Result<()> {
                 let line = line?;
 
                 match link::parse_any_link(&line) {
-                    Ok(o) => outbounds.push(o),
+                    Ok(mut o) => {
+                        if args.uuid_tag {
+                            let uid = uuid::Uuid::new_v4();
+                            *o.tag_mut() = uid.to_string();
+                        }
+                        outbounds.push(o);
+                    }
                     Err(err) => eprintln!("{line} {err}"),
                 }
             }

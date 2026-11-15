@@ -40,6 +40,8 @@ pub struct Args {
 
     pub api: String,
     pub token: Option<String>,
+
+    pub uuid_tag: bool,
 }
 
 impl Args {
@@ -94,6 +96,7 @@ impl Args {
                     "flush-fakeip-cache" => args.flush_fakeip_cache = true,
                     "flush-dns-cache" => args.flush_dns_cache = true,
                     "upgrade-ui" => args.upgrade_ui = true,
+                    "uuid-tag" => args.uuid_tag = true,
                     // terminal
                     "help" => {
                         println!("{}", help());
@@ -118,6 +121,7 @@ impl Args {
                         'F' => args.flush_fakeip_cache = true,
                         'N' => args.flush_dns_cache = true,
                         'U' => args.upgrade_ui = true,
+                        'Z' => args.uuid_tag = true,
                         'h' => {
                             println!("{}", help());
                             std::process::exit(0);
@@ -222,10 +226,11 @@ DNS
 Link converter
   -l, --links-to-outbounds <SRC>    Convert links to outbounds
   -L, --links-from-outbounds <SRC>  Convert outbounds to links
+  -Z, --uuid-tag                    Rewrite tags to random UUIDs
   -o, --output <DST>                Output file for the preceding -l/-L
 Other
   -U, --upgrade-ui                  
-  -h, --help; -V, --version; --completions
+  -h, --help; -V, --version
 "
     )
 }
