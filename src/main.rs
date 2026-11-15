@@ -14,30 +14,20 @@ fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
-fn validate_url(url: &str) -> Result<()> {
-    let ok = url
-        .get(..8)
-        .is_some_and(|s| s.eq_ignore_ascii_case("https://"));
-    if !ok {
-        return Err("probe url must start with https://".into());
-    }
-    Ok(())
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = cli::Args::parse();
 
-    // --- link converter ---
     for opt in args.link_converter.iter() {
         if opt.is_from {
             let file = std::fs::File::open(&opt.src)?;
             let outbounds: Vec<models::AnyOutbound> = serde_json::from_reader(file)?;
+
             let mut out: Box<dyn Write> = if let Some(ref dst) = opt.dst {
                 Box::new(std::fs::File::create(dst)?)
             } else {
                 Box::new(std::io::stdout())
             };
+
             for (n, o) in outbounds.iter().enumerate() {
                 match link::any_outbound_to_link(o) {
                     Ok(l) => writeln!(out, "{l}")?,
@@ -48,14 +38,18 @@ async fn main() -> Result<()> {
             let file = std::fs::File::open(&opt.src)?;
             let reader = std::io::BufReader::new(file);
             let mut outbounds = Vec::new();
+
             for line in reader.lines() {
                 let line = line?;
+
                 match link::parse_any_link(&line) {
                     Ok(o) => outbounds.push(o),
                     Err(err) => eprintln!("{line} {err}"),
                 }
             }
+
             let json = serde_json::to_string_pretty(&outbounds)?;
+
             if let Some(ref out_path) = opt.dst {
                 std::fs::write(out_path, json)?;
             } else {
@@ -80,20 +74,35 @@ async fn main() -> Result<()> {
         || args.flush_dns_cache
         || args.upgrade_ui;
 
+    // No API commands: exit without initializing Tokio
     if !has_api_cmd {
         return Ok(());
     }
 
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    rt.block_on(run_api(args))
+}
+
+async fn run_api(args: cli::Args) -> Result<()> {
     let mut builder = Client::builder(&args.api);
+
     if let Some(ref t) = args.token {
         builder = builder.secret(t);
     }
+
     let client = builder.build()?;
 
-    // --- proxies ---
     if args.proxies {
-        // print_json(&client.proxies().await?)?;
-        println!("{:?}", client.proxies().await?);
+        print_json(
+            &client
+                .proxies()
+                .await?
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )?;
     }
     if let Some(name) = args.proxy.as_deref() {
         print_json(&client.proxy(name).await?)?;
@@ -102,21 +111,32 @@ async fn main() -> Result<()> {
         if member.is_empty() {
             return Err("member name must not be empty".into());
         }
+
         client.select_proxy(group, member).await?;
-        println!("{{\"ok\": true}}");
+    }
+    if let Some(g) = args.select_random.as_ref() {
+        let group = client.group(g).await?;
+        let all = group.all.unwrap_or(vec![]);
+        if !all.is_empty() {
+            if let Some(member) = fastrand::choice(all.iter()) {
+                client.select_proxy(g, member).await?;
+            }
+        }
     }
     if let Some(name) = args.proxy_delay.as_deref() {
-        validate_url(&args.url)?;
         if !(1..=32767).contains(&args.timeout_ms) {
             return Err("probe timeout must be between 1 and 32767 milliseconds".into());
         }
+
         let d = client
             .proxy_delay(name, &args.url, Duration::from_millis(args.timeout_ms))
             .await?;
-        print_json(&serde_json::json!({ "name": name, "delay_ms": d.as_millis() as u64 }))?;
-    }
 
-    // --- groups ---
+        print_json(&serde_json::json!({
+            "name": name,
+            "delay_ms": d.as_millis() as u64
+        }))?;
+    }
     if args.groups {
         print_json(&client.groups().await?)?;
     }
@@ -124,26 +144,24 @@ async fn main() -> Result<()> {
         print_json(&client.group(name).await?)?;
     }
     if let Some(name) = args.group_delay.as_deref() {
-        validate_url(&args.url)?;
         if !(1..=i32::MAX as u64).contains(&args.timeout_ms) {
             return Err("probe timeout must be between 1 and 2147483647 milliseconds".into());
         }
+
         let map = client
             .group_delay(name, &args.url, Duration::from_millis(args.timeout_ms))
             .await?;
+
         let out: std::collections::BTreeMap<String, u64> = map
             .into_iter()
             .map(|(k, v)| (k, v.as_millis() as u64))
             .collect();
+
         print_json(&out)?;
     }
-
-    // --- rules ---
     if args.rules {
         print_json(&client.rules().await?)?;
     }
-
-    // --- connections ---
     if args.connections {
         print_json(&client.connections().await?)?;
     }
@@ -153,24 +171,18 @@ async fn main() -> Result<()> {
     if let Some(id) = args.close_connection.as_deref() {
         client.close_connection(id).await?;
     }
-
-    // --- dns ---
     if let Some((name, ty)) = args.dns_query.as_ref() {
         if ty.is_empty() {
             return Err("record type must not be empty".into());
         }
         print_json(&client.dns_query(name, ty).await?)?;
     }
-
-    // --- cache ---
     if args.flush_fakeip_cache {
         client.flush_fakeip_cache().await?;
     }
     if args.flush_dns_cache {
         client.flush_dns_cache().await?;
     }
-
-    // --- ui ---
     if args.upgrade_ui {
         client.upgrade_ui().await?;
     }

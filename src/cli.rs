@@ -1,13 +1,15 @@
 use std::path::PathBuf;
 
+/// One `-l` / `-L` conversion request.
 #[derive(Clone, Debug, Default)]
 pub struct LinkConverterOpt {
     pub src: PathBuf,
+    /// `true` for `-L` (outbounds -> links), `false` for `-l` (links -> outbounds).
     pub is_from: bool,
+    /// Set by a following `-o`.
     pub dst: Option<PathBuf>,
 }
 
-// cli.rs
 #[derive(Clone, Debug, Default)]
 pub struct Args {
     pub link_converter: Vec<LinkConverterOpt>,
@@ -21,19 +23,21 @@ pub struct Args {
 
     pub groups: bool,
     pub group: Option<String>,
+    /// `(group, member)`
     pub select: Option<(String, String)>,
+    pub select_random: Option<String>,
 
     pub rules: bool,
     pub connections: bool,
     pub close_all_connections: bool,
     pub close_connection: Option<String>,
 
+    /// `(name, record type)`
     pub dns_query: Option<(String, String)>,
     pub flush_fakeip_cache: bool,
     pub flush_dns_cache: bool,
     pub upgrade_ui: bool,
 
-    // API address
     pub api: String,
     pub token: Option<String>,
 }
@@ -41,48 +45,46 @@ pub struct Args {
 impl Args {
     pub fn parse() -> Self {
         let argv: Vec<String> = std::env::args().skip(1).collect();
-        match argv.first().map(String::as_str) {
-            Some("--complete") => complete(&argv[1..]),
-            Some("--completions") => {
-                // print!("{}", include_str!("../completion.sh"));
-                std::process::exit(0);
-            }
-            _ => {}
-        }
+        // match argv.first().map(String::as_str) {
+        //     Some("--complete") => complete(&argv[1..]),
+        //     Some("--completions") => {
+        //         print!("{}", include_str!("../completion.sh"));
+        //         std::process::exit(0);
+        //     }
+        //     _ => {}
+        // }
 
         let mut args = Self::default();
-        let mut last: Option<char> = None;
-        let mut output: Option<char> = None;
+        // Value flag waiting for its argument.
+        let mut pending: Option<char> = None;
+        // True after `-l`/`-L`, until `-o` takes it.
+        let mut output_pending = false;
 
-        if args.api.is_empty() {
-            args.api = "http://127.0.0.1:9090".into();
-        }
-        if args.url.is_empty() {
-            args.url = "https://www.gstatic.com/generate_204".to_string();
-        }
-        if args.timeout_ms == 0 {
-            args.timeout_ms = 5000;
-        }
+        args.api =
+            std::env::var("SINGBOX_CLASH_API").unwrap_or_else(|_| "http://127.0.0.1:9090".into());
+        args.url = "https://www.gstatic.com/generate_204".to_string();
+        args.timeout_ms = 5000;
 
         let mut iter = argv.into_iter();
         while let Some(arg) = iter.next() {
             if let Some(flag) = arg.strip_prefix("--") {
                 match flag {
                     // value-taking
-                    "links-to-outbounds" => last = Some('l'),
-                    "links-from-outbounds" => last = Some('L'),
-                    "output" => last = Some('o'),
-                    "proxy" => last = Some('p'),
-                    "group" => last = Some('g'),
-                    "proxy-delay" => last = Some('d'),
-                    "group-delay" => last = Some('D'),
-                    "select" => last = Some('s'),
-                    "close-connection" => last = Some('c'),
-                    "dns-query" => last = Some('q'),
-                    "url" => last = Some('u'),
-                    "timeout" => last = Some('t'),
-                    "api" => last = Some('a'),
-                    "token" => last = Some('T'),
+                    "links-to-outbounds" => pending = Some('l'),
+                    "links-from-outbounds" => pending = Some('L'),
+                    "output" => pending = Some('o'),
+                    "proxy" => pending = Some('p'),
+                    "group" => pending = Some('g'),
+                    "proxy-delay" => pending = Some('d'),
+                    "group-delay" => pending = Some('D'),
+                    "select" => pending = Some('s'),
+                    "select-rand" => pending = Some('S'),
+                    "close-connection" => pending = Some('c'),
+                    "dns-query" => pending = Some('q'),
+                    "url" => pending = Some('u'),
+                    "timeout" => pending = Some('t'),
+                    "api" => pending = Some('a'),
+                    "token" => pending = Some('T'),
                     // boolean
                     "proxies" => args.proxies = true,
                     "groups" => args.groups = true,
@@ -106,8 +108,8 @@ impl Args {
             } else if let Some(flags) = arg.strip_prefix('-') {
                 for c in flags.chars() {
                     match c {
-                        'l' | 'L' | 'o' | 'p' | 'g' | 'd' | 'D' | 's' | 'c' | 'q' | 'u' | 't'
-                        | 'a' | 'T' => last = Some(c),
+                        'l' | 'L' | 'o' | 'p' | 'g' | 'd' | 'D' | 's' | 'S' | 'c' | 'q' | 'u'
+                        | 't' | 'a' | 'T' => pending = Some(c),
                         'P' => args.proxies = true,
                         'G' => args.groups = true,
                         'R' => args.rules = true,
@@ -128,58 +130,48 @@ impl Args {
                     }
                 }
             } else {
-                match last.take() {
-                    Some('l') => {
-                        output.replace('l');
+                match pending.take() {
+                    Some(c @ ('l' | 'L')) => {
+                        output_pending = true;
                         args.link_converter.push(LinkConverterOpt {
                             src: PathBuf::from(arg),
-                            is_from: false,
+                            is_from: c == 'L',
                             dst: None,
                         });
                     }
-                    Some('L') => {
-                        output.replace('l');
-                        args.link_converter.push(LinkConverterOpt {
-                            src: PathBuf::from(arg),
-                            is_from: true,
-                            dst: None,
-                        });
-                    }
-                    Some('o') => match output.take() {
-                        Some('l') => {
-                            args.link_converter
-                                .last_mut()
-                                .map(|l| l.dst = Some(PathBuf::from(arg)));
+                    Some('o') => {
+                        if std::mem::take(&mut output_pending) {
+                            if let Some(l) = args.link_converter.last_mut() {
+                                l.dst = Some(PathBuf::from(arg));
+                            }
                         }
-                        _ => {}
-                    },
+                    }
                     Some('p') => args.proxy = Some(arg),
                     Some('g') => args.group = Some(arg),
                     Some('d') => args.proxy_delay = Some(arg),
                     Some('D') => args.group_delay = Some(arg),
+                    // Two values: <group> <member>.
                     Some('s') => {
-                        // select: первый токен — группа, второй — участник
                         match args.select.take() {
                             None => args.select = Some((arg, String::new())),
                             Some((g, _)) => args.select = Some((g, arg)),
                         }
-                        last = Some('s');
+                        pending = Some('s');
                     }
+                    Some('S') => args.select_random = Some(arg),
                     Some('c') => args.close_connection = Some(arg),
+                    // Two values: <name> <type>.
                     Some('q') => {
-                        // dns-query: первый токен — имя, второй — тип
                         match args.dns_query.take() {
                             None => args.dns_query = Some((arg, String::new())),
                             Some((n, _)) => args.dns_query = Some((n, arg)),
                         }
-                        last = Some('q');
+                        pending = Some('q');
                     }
                     Some('u') => args.url = arg,
                     Some('t') => args.timeout_ms = arg.parse().unwrap_or(args.timeout_ms),
                     Some('a') => args.api = arg,
-                    Some('T') => {
-                        args.token.replace(arg);
-                    }
+                    Some('T') => args.token = Some(arg),
                     _ => {}
                 }
             }
@@ -192,7 +184,7 @@ impl Args {
 const VERSION: &str = concat!(
     "singbox-cli ",
     env!("CARGO_PKG_VERSION"),
-    " [https://github.com/nlkli/recol]"
+    " [https://github.com/nlkli/singbox-cli]"
 );
 
 fn help() -> String {
@@ -200,144 +192,143 @@ fn help() -> String {
         "\
 {VERSION}
 
-USAGE:
-    singbox-cli [OPTIONS]
+Usage: singbox-cli [OPTIONS]
 
-API:
-    -a, --api <URL>                   API base URL (default: http://127.0.0.1:9090)
-    -T, --token <TOKEN>               Bearer token
-
-PROXIES:
-    -P, --proxies                     GET /proxies
-    -p, --proxy <NAME>                GET /proxies/{{name}}
-    -s, --select <GROUP> <MEMBER>     PUT /proxies/{{group}}
-    -d, --proxy-delay <NAME>          GET /proxies/{{name}}/delay
-    -u, --url <URL>                   Probe URL, https:// (default: gstatic 204)
-    -t, --timeout <MS>                Probe timeout (proxy: 1..=32767, group: 1..=i32::MAX)
-
-GROUPS:
-    -G, --groups                      GET /group
-    -g, --group <NAME>                GET /group/{{name}}
-    -D, --group-delay <NAME>          GET /group/{{name}}/delay
-
-RULES:
-    -R, --rules                       GET /rules
-
-CONNECTIONS:
-    -C, --connections                 GET /connections
-    -X, --close-all-connections       DELETE /connections
-    -c, --close-connection <ID>       DELETE /connections/{{id}}
-
-DNS:
-    -q, --dns-query <NAME> <TYPE>     GET /dns/query (TYPE: A, AAAA, TXT, ...)
-
-CACHE:
-    -F, --flush-fakeip-cache          POST /cache/fakeip/flush
-    -N, --flush-dns-cache             POST /cache/dns/flush
-
-UI:
-    -U, --upgrade-ui                  POST /upgrade/ui
-
-LINK CONVERTER:
-    -l, --links-to-outbounds <SRC>    links -> outbounds
-    -L, --links-from-outbounds <SRC>  outbounds -> links
-    -o, --output <DST>                Output for last -l/-L
-
-MISC:
-    -h, --help                        Print help
-    -V, --version                     Print version
-",
-        VERSION = VERSION
+  -a, --api <URL>                   Controller URL [env: SINGBOX_CLASH_API]
+                                    [default: http://127.0.0.1:9090]
+  -T, --token <TOKEN>               Bearer token (secret)
+Proxies
+  -P, --proxies                     List proxies
+  -p, --proxy <NAME>                Show a proxy
+  -s, --select <GROUP> <NAME>       Select a group member
+  -S, --select-rand <GROUP>         Select a random group member
+  -d, --proxy-delay <NAME>          Test a proxy delay
+Groups
+  -G, --groups                      List groups
+  -g, --group <NAME>                Show a group
+  -D, --group-delay <NAME>          Test a group delay
+Delay test
+  -u, --url <URL>                   Probe URL [default: gstatic 204]
+  -t, --timeout <MS>                Probe timeout [default: 5000]
+Rules and connections
+  -R, --rules                       List rules
+  -C, --connections                 List connections
+  -c, --close-connection <ID>       Close a connection
+  -X, --close-all-connections       Close all connections
+DNS
+  -q, --dns-query <NAME> <TYPE>     Query DNS (A, AAAA, TXT, ...)
+  -N, --flush-dns-cache             Flush DNS cache
+  -F, --flush-fakeip-cache          Flush fake-IP cache
+Link converter
+  -l, --links-to-outbounds <SRC>    Convert links to outbounds
+  -L, --links-from-outbounds <SRC>  Convert outbounds to links
+  -o, --output <DST>                Output file for the preceding -l/-L
+Other
+  -U, --upgrade-ui                  
+  -h, --help; -V, --version; --completions
+"
     )
 }
 
-// fn help() -> String {
-//     format!(
-//         r#"sing-box cli tool
-// {magenta}https://github.com/nlkli/singbox-cli{reset}
+// /// Every flag, offered when completing a word that starts with `-`.
+// const FLAGS: &[&str] = &[
+//     "-a",
+//     "--api",
+//     "-T",
+//     "--token",
+//     "-P",
+//     "--proxies",
+//     "-p",
+//     "--proxy",
+//     "-s",
+//     "--select",
+//     "-S",
+//     "--select-rand",
+//     "-d",
+//     "--proxy-delay",
+//     "-G",
+//     "--groups",
+//     "-g",
+//     "--group",
+//     "-D",
+//     "--group-delay",
+//     "-u",
+//     "--url",
+//     "-t",
+//     "--timeout",
+//     "-R",
+//     "--rules",
+//     "-C",
+//     "--connections",
+//     "-c",
+//     "--close-connection",
+//     "-X",
+//     "--close-all-connections",
+//     "-q",
+//     "--dns-query",
+//     "-N",
+//     "--flush-dns-cache",
+//     "-F",
+//     "--flush-fakeip-cache",
+//     "-l",
+//     "--links-to-outbounds",
+//     "-L",
+//     "--links-from-outbounds",
+//     "-o",
+//     "--output",
+//     "-U",
+//     "--upgrade-ui",
+//     "-h",
+//     "--help",
+//     "-V",
+//     "--version",
+// ];
 //
-// {green}Usage:{reset} {blue}singbox-cli [OPTIONS]{reset}
+// /// Record types offered after `--dns-query <NAME>`.
+// const DNS_TYPES: &[&str] = &["A", "AAAA", "CNAME", "MX", "NS", "PTR", "SRV", "TXT"];
 //
-// {green}Options:{reset} (most flags can be combined)
-//   {blue}-h{reset}, {blue}--help{reset}; {blue}-V{reset}, {blue}--version{reset}; {blue}--completions{reset}; {blue}--logo{reset}"#,
-//         reset = RESET,
-//         green = GREEN,
-//         blue = BLUE,
-//         magenta = MAGENTA,
-//     )
+// /// Backend for `completion.sh`: `--complete <index> <word>...`.
+// ///
+// /// `word[0]` is the program name, `word[index]` the word being completed.
+// /// Prints one candidate per line, or `@file` to ask the shell for file paths.
+// /// The shell filters candidates by prefix.
+// fn complete(args: &[String]) -> ! {
+//     let idx: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+//     let words = args.get(1..).unwrap_or(&[]);
+//     let word = |i: usize| words.get(i).map_or("", String::as_str);
+//
+//     let cur = word(idx);
+//     let prev = idx.checked_sub(1).map_or("", word);
+//     let prev2 = idx.checked_sub(2).map_or("", word);
+//
+//     if cur.starts_with('-') {
+//         FLAGS.iter().for_each(|f| println!("{f}"));
+//     } else if matches!(
+//         prev,
+//         "-l" | "--links-to-outbounds" | "-L" | "--links-from-outbounds" | "-o" | "--output"
+//     ) {
+//         println!("@file");
+//     } else if matches!(prev2, "-q" | "--dns-query") {
+//         DNS_TYPES.iter().for_each(|t| println!("{t}"));
+//     }
+//     std::process::exit(0);
 // }
-
-// Standard ANSI color codes
-const RESET: &str = "\x1b[0m";
-const GREEN: &str = "\x1b[32m";
-const BLUE: &str = "\x1b[34m";
-const MAGENTA: &str = "\x1b[35m";
-const CYAN: &str = "\x1b[36m";
-// const BRIGHT_BLACK: &str = "\x1b[90m";
-const BRIGHT_BLUE: &str = "\x1b[94m";
-const BRIGHT_MAGENTA: &str = "\x1b[95m";
-
-#[derive(Debug, Clone, Default)]
-pub enum StdIn {
-    #[default]
-    None,
-}
-
-pub fn read_stdin(args: &Args) -> crate::Result<StdIn> {
-    use std::io::{IsTerminal, Read};
-
-    let mut stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return Ok(StdIn::None);
-    }
-
-    let mut input = String::new();
-    stdin.read_to_string(&mut input)?;
-
-    let trimmed = input.trim();
-
-    Ok(StdIn::None)
-}
-
-const FLAGS: &[&str] = &[];
-
-fn complete(args: &[String]) {
-    // let idx: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-    // let words = args.get(1..).unwrap_or(&[]);
-    // let cur_owned: String = words
-    //     .get(idx)
-    //     .map(|s| {
-    //         s.chars()
-    //             .filter(|c| !matches!(c, '\\' | '"' | '\''))
-    //             .collect()
-    //     })
-    //     .unwrap_or_default();
-    // let cur = cur_owned.as_str();
-    //
-    // let mut j = idx;
-    // while j > 0 && (words[j] == "=" || words[j - 1] == "=") {
-    //     j -= 1;
-    // }
-    // let prev = j
-    //     .checked_sub(1)
-    //     .and_then(|i| words.get(i))
-    //     .map(String::as_str);
-    // let after_eq = idx > 0 && words[idx - 1] == "=";
-    //
-    // let out: Vec<String> = match prev {
-    //     Some("-m" | "--media" | "-c" | "--contains") => vec![],
-    //
-    //     _ if cur.starts_with('-') => FLAGS
-    //         .iter()
-    //         .filter(|f| f.starts_with(cur))
-    //         .map(|s| s.to_string())
-    //         .collect(),
-    //
-    //     // _ => {}
-    // };
-    //
-    // for s in out {
-    //     println!("{s}");
-    // }
-    // std::process::exit(0);
-}
+//
+// # singbox-cli completion for bash and zsh: eval "$(singbox-cli --completions)"
+// # Candidates come from `singbox-cli --complete <index> <words...>`.
+// if [ -n "$ZSH_VERSION" ]; then
+//     _singbox_cli() {
+//         local -a c=( ${(f)"$("${words[1]}" --complete $((CURRENT - 1)) "${words[@]}" 2>/dev/null)"} )
+//         if [[ $c[1] == @file ]]; then _files; else compadd -a c; fi
+//     }
+//     whence compdef >/dev/null || { autoload -Uz compinit; compinit; }
+//     compdef _singbox_cli singbox-cli
+// else
+//     _singbox_cli() {
+//         local out
+//         out=$("${COMP_WORDS[0]}" --complete "$COMP_CWORD" "${COMP_WORDS[@]}" 2>/dev/null)
+//         if [[ $out == @file ]]; then out=$(compgen -f -- "${COMP_WORDS[COMP_CWORD]}"); fi
+//         COMPREPLY=( $(compgen -W "$out" -- "${COMP_WORDS[COMP_CWORD]}") )
+//     }
+//     complete -o filenames -F _singbox_cli singbox-cli
+// fi
