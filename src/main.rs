@@ -45,8 +45,12 @@ fn main() -> Result<()> {
 
             for line in reader.lines() {
                 let line = line?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
 
-                match link::parse_any_link(&line) {
+                match link::parse_any_link(trimmed) {
                     Ok(mut o) => {
                         if args.uuid_tag {
                             let uid = uuid::Uuid::new_v4();
