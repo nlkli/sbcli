@@ -186,9 +186,9 @@ impl Args {
 }
 
 const VERSION: &str = concat!(
-    "singbox-cli ",
+    "sbcli ",
     env!("CARGO_PKG_VERSION"),
-    " [https://github.com/nlkli/singbox-cli]"
+    " [https://github.com/nlkli/sbcli]"
 );
 
 fn help() -> String {
@@ -196,7 +196,7 @@ fn help() -> String {
         "\
 {VERSION}
 
-Usage: singbox-cli [OPTIONS]
+Usage: sbcli [OPTIONS]
 
   -a, --api <URL>                   Controller URL [env: SINGBOX_CLASH_API]
                                     [default: http://127.0.0.1:9090]
@@ -319,15 +319,15 @@ Other
 //     std::process::exit(0);
 // }
 //
-// # singbox-cli completion for bash and zsh: eval "$(singbox-cli --completions)"
-// # Candidates come from `singbox-cli --complete <index> <words...>`.
+// # sbcli completion for bash and zsh: eval "$(sbcli --completions)"
+// # Candidates come from `sbcli --complete <index> <words...>`.
 // if [ -n "$ZSH_VERSION" ]; then
 //     _singbox_cli() {
 //         local -a c=( ${(f)"$("${words[1]}" --complete $((CURRENT - 1)) "${words[@]}" 2>/dev/null)"} )
 //         if [[ $c[1] == @file ]]; then _files; else compadd -a c; fi
 //     }
 //     whence compdef >/dev/null || { autoload -Uz compinit; compinit; }
-//     compdef _singbox_cli singbox-cli
+//     compdef _singbox_cli sbcli
 // else
 //     _singbox_cli() {
 //         local out
@@ -335,5 +335,5 @@ Other
 //         if [[ $out == @file ]]; then out=$(compgen -f -- "${COMP_WORDS[COMP_CWORD]}"); fi
 //         COMPREPLY=( $(compgen -W "$out" -- "${COMP_WORDS[COMP_CWORD]}") )
 //     }
-//     complete -o filenames -F _singbox_cli singbox-cli
+//     complete -o filenames -F _singbox_cli sbcli
 // fi
