@@ -230,8 +230,7 @@ Link converter
   -o, --output <DST>                Output file for the preceding -l/-L
 Other
   -U, --upgrade-ui                  
-  -h, --help; -V, --version
-"
+  -h, --help; -V, --version"
     )
 }
 
