@@ -24,13 +24,13 @@ pub struct Args {
     pub groups: bool,
     pub group: Option<String>,
     /// `(group, member)`
-    pub select: Option<(String, String)>,
-    pub select_random: Option<String>,
+    pub select: Vec<(String, String)>,
+    pub select_random: Vec<String>,
 
     pub rules: bool,
     pub connections: bool,
     pub close_all_connections: bool,
-    pub close_connection: Option<String>,
+    pub close_connection: Vec<String>,
 
     /// `(name, record type)`
     pub dns_query: Option<(String, String)>,
@@ -59,8 +59,8 @@ impl Args {
         let mut args = Self::default();
         // Value flag waiting for its argument.
         let mut pending: Option<char> = None;
-        // True after `-l`/`-L`, until `-o` takes it.
         let mut output_pending = false;
+        let mut select_group: Option<String> = None;
 
         args.api =
             std::env::var("SINGBOX_CLASH_API").unwrap_or_else(|_| "http://127.0.0.1:9090".into());
@@ -155,15 +155,15 @@ impl Args {
                     Some('d') => args.proxy_delay = Some(arg),
                     Some('D') => args.group_delay = Some(arg),
                     // Two values: <group> <member>.
-                    Some('s') => {
-                        match args.select.take() {
-                            None => args.select = Some((arg, String::new())),
-                            Some((g, _)) => args.select = Some((g, arg)),
+                    Some('s') => match select_group.take() {
+                        None => {
+                            select_group = Some(arg);
+                            pending = Some('s');
                         }
-                        pending = Some('s');
-                    }
-                    Some('S') => args.select_random = Some(arg),
-                    Some('c') => args.close_connection = Some(arg),
+                        Some(group) => args.select.push((group, arg)),
+                    },
+                    Some('S') => args.select_random.push(arg),
+                    Some('c') => args.close_connection.push(arg),
                     // Two values: <name> <type>.
                     Some('q') => {
                         match args.dns_query.take() {
@@ -179,6 +179,9 @@ impl Args {
                     _ => {}
                 }
             }
+        }
+        if let Some(group) = select_group {
+            args.select.push((group, String::new()));
         }
 
         args

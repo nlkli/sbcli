@@ -1,6 +1,7 @@
 mod cli;
 mod link;
 mod models;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::io::{BufRead, Write};
 use std::time::Duration;
@@ -74,7 +75,8 @@ fn main() -> Result<()> {
 
     let has_api_cmd = args.proxies
         || args.proxy.is_some()
-        || args.select.is_some()
+        || !args.select.is_empty()
+        || !args.select_random.is_empty()
         || args.proxy_delay.is_some()
         || args.groups
         || args.group.is_some()
@@ -82,11 +84,19 @@ fn main() -> Result<()> {
         || args.rules
         || args.connections
         || args.close_all_connections
-        || args.close_connection.is_some()
+        || !args.close_connection.is_empty()
         || args.dns_query.is_some()
         || args.flush_fakeip_cache
         || args.flush_dns_cache
         || args.upgrade_ui;
+
+    if !args.select.is_empty() || !args.select_random.is_empty() {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        fastrand::seed(seed);
+    }
 
     // No API commands: exit without initializing Tokio
     if !has_api_cmd {
@@ -121,20 +131,17 @@ async fn run_api(args: cli::Args) -> Result<()> {
     if let Some(name) = args.proxy.as_deref() {
         print_json(&client.proxy(name).await?)?;
     }
-    if let Some((group, member)) = args.select.as_ref() {
+    for (group, member) in &args.select {
         if member.is_empty() {
             return Err("member name must not be empty".into());
         }
-
         client.select_proxy(group, member).await?;
     }
-    if let Some(g) = args.select_random.as_ref() {
+    for g in &args.select_random {
         let group = client.group(g).await?;
-        let all = group.all.unwrap_or(vec![]);
-        if !all.is_empty() {
-            if let Some(member) = fastrand::choice(all.iter()) {
-                client.select_proxy(g, member).await?;
-            }
+        let all = group.all.unwrap_or_default();
+        if let Some(member) = fastrand::choice(all.iter()) {
+            client.select_proxy(g, member).await?;
         }
     }
     if let Some(name) = args.proxy_delay.as_deref() {
@@ -182,7 +189,7 @@ async fn run_api(args: cli::Args) -> Result<()> {
     if args.close_all_connections {
         client.close_all_connections().await?;
     }
-    if let Some(id) = args.close_connection.as_deref() {
+    for id in &args.close_connection {
         client.close_connection(id).await?;
     }
     if let Some((name, ty)) = args.dns_query.as_ref() {
