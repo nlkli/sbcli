@@ -226,3 +226,7 @@ sbcli -s out direct          # bypass the proxy
 sbcli -s out proxy           # route through the proxy
 sbcli -i                     # interactive mode
 ```
+
+---
+
+sing-box singbox clash-api cli tui rust proxy proxy-manager proxy-client link-converter tun vless hysteria2 shadowsocks trojan socks5 dns selector terminal networking
