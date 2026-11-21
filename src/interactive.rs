@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
+
+use singbox_clash_api::{Client, Connection, Snapshot};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossterm::{
     cursor,
@@ -10,14 +12,13 @@ use crossterm::{
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use singbox_clash_api::Client;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::{self, Instant, MissedTickBehavior};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const SCROLLOFF: usize = 6;
-const MIN_SIZE: (u16, u16) = (60, 8);
+const SCROLLOFF: usize = 5;
+const MIN_SIZE: (u16, u16) = (64, 8);
 const GAP: &str = "  ";
 const COLUMNS: usize = 5;
 const HEADERS: [&str; COLUMNS] = ["TYPE", "NAME", "MEM", "NOW", "MS"];
@@ -28,15 +29,39 @@ const ALIGNS: [Align; COLUMNS] = [
     Align::Left,
     Align::Right,
 ];
-const DELAY_STALE_AFTER: Duration = Duration::from_secs(10);
-const HINT: &str = " q quit   h/l pane   j/k move   g/G ends   / filter   esc clear   Enter select";
+const DELAY_STALE_AFTER: Duration = Duration::from_secs(15);
+const HINT: &str =
+    "Enter select | c connections | / filter | esc clear | h/l pane | j/k move | q quit";
+const CONN_COLS: usize = 8;
+const CONN_HEADERS: [&str; CONN_COLS] = [
+    "NET",
+    "SOURCE",
+    "DESTINATION",
+    "CHAIN",
+    "RULE",
+    "UP",
+    "DOWN",
+    "AGE",
+];
+const CONN_ALIGNS: [Align; CONN_COLS] = [
+    Align::Left,
+    Align::Left,
+    Align::Left,
+    Align::Left,
+    Align::Left,
+    Align::Right,
+    Align::Right,
+    Align::Right,
+];
+const CONN_HINT: &str = "K kill | X kill all | c/esc back | q quit | j/k move";
 
-const DELAY_INTERVAL: Duration = Duration::from_secs(7);
+const DELAY_INTERVAL: Duration = Duration::from_secs(5);
+const DELAY_INTERVAL_CONNECTIONS: Duration = Duration::from_secs(14);
 const PROXIES_REFRESH: Duration = Duration::from_secs(21);
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECTIONS_REFRESH_BACKGROUND: Duration = Duration::from_secs(14);
 const MAX_CONCURRENT_PROBES: usize = 42;
 
-const SLEEP_TIMEOUT: Duration = DELAY_STALE_AFTER;
+const SLEEP_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Clone, Copy)]
 enum Align {
@@ -44,34 +69,59 @@ enum Align {
     Right,
 }
 
-fn fit(text: &str, width: usize, align: Align) -> String {
-    let (mut shown, used) = if text.width() <= width {
-        (text.to_owned(), text.width())
-    } else {
-        let mut shown = String::new();
-        let mut used = 0;
-        for ch in text.chars() {
-            let w = ch.width().unwrap_or(0);
-            if used + w + 1 > width {
-                break;
+const PAD: &[u8] = b"                                                                                                                ";
+
+fn write_pad(out: &mut impl Write, mut n: usize) -> io::Result<()> {
+    while n > 0 {
+        let chunk = n.min(PAD.len());
+        out.write_all(&PAD[..chunk])?;
+        n -= chunk;
+    }
+    Ok(())
+}
+
+fn write_fit(out: &mut impl Write, text: &str, width: usize, align: Align) -> io::Result<()> {
+    let tw = text.width();
+    if tw <= width {
+        let pad = width - tw;
+        match align {
+            Align::Left => {
+                out.write_all(text.as_bytes())?;
+                write_pad(out, pad)?;
             }
-            shown.push(ch);
-            used += w;
+            Align::Right => {
+                write_pad(out, pad)?;
+                out.write_all(text.as_bytes())?;
+            }
         }
-        if width > 0 {
-            shown.push('…');
-            used += 1;
+        return Ok(());
+    }
+
+    let mut used = 0usize;
+    let mut end = 0usize;
+    for (i, ch) in text.char_indices() {
+        let w = ch.width().unwrap_or(0);
+        if used + w + 1 > width {
+            break;
         }
-        (shown, used)
-    };
-    let pad = " ".repeat(width.saturating_sub(used));
+        used += w;
+        end = i + ch.len_utf8();
+    }
+    let truncated = &text[..end];
+    let pad = width.saturating_sub(used + 1);
     match align {
         Align::Left => {
-            shown.push_str(&pad);
-            shown
+            out.write_all(truncated.as_bytes())?;
+            out.write_all("…".as_bytes())?;
+            write_pad(out, pad)?;
         }
-        Align::Right => pad + &shown,
+        Align::Right => {
+            write_pad(out, pad)?;
+            out.write_all("…".as_bytes())?;
+            out.write_all(truncated.as_bytes())?;
+        }
     }
+    Ok(())
 }
 
 fn restore_terminal() {
@@ -110,11 +160,11 @@ enum Delay {
 impl Delay {
     fn display(&self) -> (String, Color) {
         match *self {
-            Delay::None => ("-".into(), Color::DarkGrey),
+            Delay::None => ("-".into(), Color::White),
             Delay::Fail => ("X".into(), Color::Red),
             Delay::Success { ms, at } => {
                 let color = if at.elapsed() > DELAY_STALE_AFTER {
-                    Color::DarkGrey
+                    Color::White
                 } else {
                     match ms {
                         0..=75 => Color::Cyan,
@@ -122,7 +172,7 @@ impl Delay {
                         151..=300 => Color::Yellow,
                         301..=1000 => Color::Red,
                         1001..=2000 => Color::Magenta,
-                        _ => Color::Black,
+                        _ => Color::Blue,
                     }
                 };
                 (ms.to_string(), color)
@@ -211,6 +261,503 @@ fn entries_from_proxies(proxies: singbox_clash_api::Proxies) -> Vec<Entry> {
             )
         })
         .collect()
+}
+
+use std::fmt::{self, Display};
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+fn parse_rfc3339(s: &str) -> Option<i64> {
+    let num = |a: usize, z: usize| -> Option<i64> { s.get(a..z)?.parse::<i64>().ok() };
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, se) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+
+    let rest = s
+        .get(19..)?
+        .trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let off = if rest.is_empty() || rest.starts_with('Z') {
+        0
+    } else {
+        let sign = if rest.starts_with('-') { -1 } else { 1 };
+        let oh = rest.get(1..3)?.parse::<i64>().ok()?;
+        let om = rest.get(4..6)?.parse::<i64>().ok()?;
+        sign * (oh * 3600 + om * 60)
+    };
+
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + h * 3600 + mi * 60 + se - off)
+}
+
+struct Bytes(u64);
+
+impl Display for Bytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let n = self.0;
+        if n < 1024 {
+            return write!(f, "{n}B");
+        }
+        let mut v = n as f64 / 1024.0;
+        for unit in ["K", "M", "G", "T"] {
+            if v < 1024.0 || unit == "T" {
+                return write!(f, "{v:.1}{unit}");
+            }
+            v /= 1024.0;
+        }
+        unreachable!()
+    }
+}
+
+struct Age(i64);
+
+impl Display for Age {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = self.0.max(0);
+        match s {
+            0..=59 => write!(f, "{s}s"),
+            60..=3599 => write!(f, "{}m{:02}s", s / 60, s % 60),
+            3600..=86399 => write!(f, "{}h{:02}m", s / 3600, s % 3600 / 60),
+            _ => write!(f, "{}d{:02}h", s / 86400, s % 86400 / 3600),
+        }
+    }
+}
+
+fn addr(mut ip: String, port: &str) -> String {
+    if port.is_empty() {
+        ip
+    } else if ip.contains(':') {
+        let mut s = String::with_capacity(ip.len() + port.len() + 3);
+        s.push('[');
+        s.push_str(&ip);
+        s.push_str("]:");
+        s.push_str(port);
+        s
+    } else {
+        ip.push(':');
+        ip.push_str(port);
+        ip
+    }
+}
+
+fn net_color(network: &str) -> Color {
+    match network {
+        "tcp" => Color::Cyan,
+        "udp" => Color::Yellow,
+        _ => Color::Reset,
+    }
+}
+
+struct ConnRow {
+    id: String,
+    network: String,
+    inbound: String,
+    source: String,
+    dest: String,
+    dest_ip: String,
+    process: String,
+    chain: String,
+    rule: String,
+    upload: u64,
+    download: u64,
+    started: Option<i64>,
+    haystack: String,
+}
+
+impl ConnRow {
+    fn new(c: Connection) -> Self {
+        let chain = c.chains.join("›");
+        let started = parse_rfc3339(&c.start);
+
+        let m = c.metadata;
+        let source = addr(m.source_ip, &m.source_port);
+        let dest_ip = addr(m.destination_ip, &m.destination_port);
+        let dest = if m.host.is_empty() {
+            String::new()
+        } else if m.destination_port.is_empty() {
+            m.host
+        } else {
+            let mut d = m.host;
+            d.push(':');
+            d.push_str(&m.destination_port);
+            d
+        };
+
+        Self {
+            id: c.id,
+            network: m.network,
+            inbound: m.kind,
+            source,
+            dest,
+            dest_ip,
+            process: m.process_path,
+            chain,
+            rule: c.rule,
+            upload: c.upload,
+            download: c.download,
+            started,
+            haystack: String::new(),
+        }
+    }
+
+    #[inline]
+    fn dest(&self) -> &str {
+        if self.dest.is_empty() {
+            &self.dest_ip
+        } else {
+            &self.dest
+        }
+    }
+
+    fn haystack(&mut self) -> &str {
+        if self.haystack.is_empty() {
+            let fields = [
+                self.network.as_str(),
+                self.inbound.as_str(),
+                self.source.as_str(),
+                self.dest(),
+                self.dest_ip.as_str(),
+                self.process.as_str(),
+                self.chain.as_str(),
+                self.rule.as_str(),
+                self.id.as_str(),
+            ];
+            let cap = fields.iter().map(|s| s.len()).sum::<usize>() + fields.len();
+            let mut h = String::with_capacity(cap);
+            for (i, s) in fields.iter().enumerate() {
+                if i > 0 {
+                    h.push('\n');
+                }
+                h.extend(s.chars().flat_map(char::to_lowercase));
+            }
+            self.haystack = h;
+        }
+        &self.haystack
+    }
+
+    fn detail(&self) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(
+            48 + self.inbound.len()
+                + self.id.len()
+                + self.dest_ip.len()
+                + self.rule.len()
+                + self.process.len()
+                + self.chain.len(),
+        );
+        let _ = write!(
+            s,
+            " {}  {}  → {}  rule: {}",
+            self.inbound, self.id, self.dest_ip, self.rule
+        );
+        if !self.process.is_empty() {
+            let _ = write!(s, "  proc: {}", self.process);
+        }
+        let _ = write!(s, "  {}", self.chain);
+        s
+    }
+}
+
+#[derive(Default)]
+struct ConnView {
+    rows: Vec<ConnRow>,
+    visible: Vec<usize>,
+    filter: String,
+    cursor: usize,
+    top: usize,
+    download_total: u64,
+    upload_total: u64,
+    memory: u64,
+    col_max: [usize; 5],
+}
+
+impl ConnView {
+    fn selected(&self) -> Option<usize> {
+        self.visible.get(self.cursor).copied()
+    }
+
+    fn refilter(&mut self) {
+        self.visible.clear();
+        if self.filter.is_empty() {
+            self.visible.extend(0..self.rows.len());
+            return;
+        }
+        let q = self.filter.to_lowercase();
+        for (i, r) in self.rows.iter_mut().enumerate() {
+            if r.haystack().contains(&q) {
+                self.visible.push(i);
+            }
+        }
+    }
+
+    fn set_filter(&mut self, filter: String, _height: usize) {
+        self.filter = filter;
+        self.refilter();
+        self.cursor = 0;
+        self.top = 0;
+    }
+
+    fn apply(&mut self, snapshot: Snapshot, height: usize) {
+        let selected_id = self
+            .selected()
+            .map(|i| std::mem::take(&mut self.rows[i].id));
+
+        self.download_total = snapshot.download_total;
+        self.upload_total = snapshot.upload_total;
+        self.memory = snapshot.memory;
+
+        self.rows.clear();
+        self.rows
+            .extend(snapshot.connections.into_iter().map(ConnRow::new));
+        self.rows
+            .sort_unstable_by(|a, b| b.started.cmp(&a.started).then_with(|| a.id.cmp(&b.id)));
+
+        let mut mx = [0usize; 5];
+        for r in &self.rows {
+            mx[0] = mx[0].max(r.network.width());
+            mx[1] = mx[1].max(r.source.width());
+            mx[2] = mx[2].max(r.dest().width());
+            mx[3] = mx[3].max(r.chain.width());
+            mx[4] = mx[4].max(r.rule.width());
+        }
+        self.col_max = mx;
+
+        self.refilter();
+
+        let pos =
+            selected_id.and_then(|id| self.visible.iter().position(|&i| self.rows[i].id == id));
+        self.cursor = pos
+            .unwrap_or(self.cursor)
+            .min(self.visible.len().saturating_sub(1));
+        self.scroll_into_view(height);
+    }
+
+    fn move_to(&mut self, target: usize, height: usize) {
+        self.cursor = target.min(self.visible.len().saturating_sub(1));
+        self.scroll_into_view(height);
+    }
+
+    fn move_by(&mut self, delta: isize, height: usize) {
+        self.move_to(self.cursor.saturating_add_signed(delta), height);
+    }
+
+    fn scroll_into_view(&mut self, height: usize) {
+        let off = SCROLLOFF.min(height.saturating_sub(1) / 2);
+        if self.cursor < self.top + off {
+            self.top = self.cursor.saturating_sub(off);
+        }
+        if self.cursor + off >= self.top + height {
+            self.top = self.cursor + off + 1 - height;
+        }
+        self.top = self.top.min(self.visible.len().saturating_sub(height));
+    }
+
+    fn layout(&self, width: usize) -> [usize; CONN_COLS] {
+        let mut w = CONN_HEADERS.map(|h| h.width());
+        for (wi, m) in w.iter_mut().zip(self.col_max) {
+            *wi = (*wi).max(m);
+        }
+        w[5] = 7;
+        w[6] = 7;
+        w[7] = 6;
+
+        let gaps = 1 + GAP.len() * (CONN_COLS - 1);
+        let flex = width.saturating_sub(gaps + w[0] + w[5] + w[6] + w[7]);
+
+        let caps = [24, 48, 48, 32];
+        let mut f = [
+            w[1].min(caps[0]),
+            w[2].min(caps[1]),
+            w[3].min(caps[2]),
+            w[4].min(caps[3]),
+        ];
+        while f.iter().sum::<usize>() > flex {
+            let (i, &m) = f.iter().enumerate().max_by_key(|&(_, &v)| v).unwrap();
+            if m <= 4 {
+                break;
+            }
+            f[i] -= 1;
+        }
+        let mut widths = [w[0], f[0], f[1], f[2], f[3], w[5], w[6], w[7]];
+        let used: usize = widths.iter().sum::<usize>() + gaps;
+        widths[CONN_COLS - 1] += width.saturating_sub(used);
+        widths[CONN_COLS - 1] -= 1;
+        widths
+    }
+}
+
+fn write_conn_line(
+    out: &mut impl Write,
+    width: usize,
+    widths: &[usize; CONN_COLS],
+    attr: Attribute,
+    cells: [(&str, Color); CONN_COLS],
+) -> io::Result<()> {
+    queue!(out, SetAttribute(attr), Print(' '))?;
+    let mut used = 1;
+    for (i, (text, color)) in cells.into_iter().enumerate() {
+        if i > 0 {
+            queue!(out, Print(GAP))?;
+            used += GAP.len();
+        }
+        queue!(out, SetForegroundColor(color))?;
+        write_fit(out, text, widths[i], CONN_ALIGNS[i])?;
+        used += widths[i];
+    }
+    write_pad(out, width.saturating_sub(used))?;
+    queue!(out, ResetColor, SetAttribute(Attribute::Reset))
+}
+
+fn draw_connections(
+    out: &mut impl Write,
+    view: &ConnView,
+    cols: u16,
+    rows: u16,
+    sleep: bool,
+) -> io::Result<()> {
+    use std::fmt::Write as _;
+
+    let width = usize::from(cols);
+    let height = usize::from(rows).saturating_sub(4);
+    queue!(out, SetAttribute(Attribute::Reset), ResetColor)?;
+
+    // title bar
+    let title = " CONNECTIONS ";
+    let stat = format!(
+        "↑{} ↓{} mem {} ",
+        Bytes(view.upload_total),
+        Bytes(view.download_total),
+        Bytes(view.memory),
+    );
+    let counter = format!(" {}/{} ", view.visible.len(), view.rows.len());
+    let title_w = title
+        .width()
+        .min(width.saturating_sub(stat.width() + counter.width()));
+    let filter_raw = if view.filter.is_empty() {
+        String::new()
+    } else {
+        format!(" /{}", view.filter)
+    };
+    let rest = width.saturating_sub(title_w + stat.width() + counter.width());
+    let filter_w = filter_raw.width().min(rest);
+    let pad = rest - filter_w;
+
+    queue!(
+        out,
+        cursor::MoveTo(0, 0),
+        SetAttribute(Attribute::Reverse),
+        SetAttribute(Attribute::Bold)
+    )?;
+    if sleep {
+        queue!(out, SetForegroundColor(Color::Magenta))?;
+    }
+    write_fit(out, title, title_w, Align::Left)?;
+    queue!(
+        out,
+        SetAttribute(Attribute::Reset),
+        ResetColor,
+        SetAttribute(Attribute::Underlined),
+        SetForegroundColor(Color::Yellow)
+    )?;
+    write_fit(out, &filter_raw, filter_w, Align::Left)?;
+    write_pad(out, pad)?;
+    queue!(
+        out,
+        SetForegroundColor(Color::Cyan),
+        Print(stat.as_str()),
+        SetForegroundColor(Color::White),
+        Print(counter.as_str()),
+        SetAttribute(Attribute::Reset),
+        ResetColor
+    )?;
+
+    // header
+    let widths = view.layout(width);
+    queue!(out, cursor::MoveTo(0, 1))?;
+    write_conn_line(
+        out,
+        width,
+        &widths,
+        Attribute::Bold,
+        CONN_HEADERS.map(|h| (h, Color::White)),
+    )?;
+
+    // rows
+    let now = unix_now();
+    let mut up = String::with_capacity(8);
+    let mut down = String::with_capacity(8);
+    let mut age = String::with_capacity(8);
+
+    for line in 0..height {
+        let pos = view.top + line;
+        queue!(out, cursor::MoveTo(0, line as u16 + 2))?;
+        match view.visible.get(pos) {
+            Some(&i) => {
+                let r = &view.rows[i];
+                let attr = if pos == view.cursor {
+                    Attribute::Reverse
+                } else {
+                    Attribute::Reset
+                };
+
+                up.clear();
+                down.clear();
+                age.clear();
+                let _ = write!(up, "{}", Bytes(r.upload));
+                let _ = write!(down, "{}", Bytes(r.download));
+                match r.started {
+                    Some(s) => {
+                        let _ = write!(age, "{}", Age(now - s));
+                    }
+                    None => age.push('-'),
+                }
+
+                let rule_color = if r.rule == "final" {
+                    Color::Yellow
+                } else {
+                    Color::Reset
+                };
+                write_conn_line(
+                    out,
+                    width,
+                    &widths,
+                    attr,
+                    [
+                        (r.network.as_str(), net_color(&r.network)),
+                        (r.source.as_str(), Color::Reset),
+                        (r.dest(), Color::Blue),
+                        (r.chain.as_str(), Color::Reset),
+                        (r.rule.as_str(), rule_color),
+                        (up.as_str(), Color::Green),
+                        (down.as_str(), Color::Red),
+                        (age.as_str(), Color::Reset),
+                    ],
+                )?;
+            }
+            None => write_pad(out, width)?,
+        }
+    }
+
+    // details of selected connection
+    let detail = view
+        .selected()
+        .map(|i| view.rows[i].detail())
+        .unwrap_or_default();
+    queue!(
+        out,
+        cursor::MoveTo(0, rows - 2),
+        SetForegroundColor(Color::Magenta),
+    )?;
+    write_fit(out, &detail, width, Align::Left)?;
+    queue!(out, SetAttribute(Attribute::Reset), ResetColor)
 }
 
 struct Table {
@@ -325,13 +872,14 @@ impl Table {
 
     fn layout(&self, pane_width: usize) -> [usize; COLUMNS] {
         let [kind, name, mem, now, delay] = self.widths;
-        let flex = pane_width.saturating_sub(1 + GAP.len() * (COLUMNS - 1) + kind + mem + delay);
+        let flex =
+            pane_width.saturating_sub(1 + GAP.len() * (COLUMNS - 1) + kind + mem + delay + 1);
         let now_width = if name + now <= flex {
             now
         } else {
             now.min(flex / 3)
         };
-        let name_width = name.min(flex - now_width);
+        let name_width = (name.min(flex.saturating_sub(now_width)) + 1).min(flex);
         [kind, name_width, mem, flex - name_width, delay]
     }
 }
@@ -415,24 +963,31 @@ enum Side {
 
 enum Mode {
     Normal,
-    Input { saved_filter: String },
+    Input { saved_filter: String, conns: bool },
+    Connections,
 }
 
 enum Msg {
     Term(io::Result<Event>),
     Proxies(Vec<Entry>),
     Delay { probe: String, delay: Delay },
+    Redraw,
+    Sleep(bool),
+    Snapshot(Snapshot),
 }
 
 struct App {
     size: (u16, u16),
     left: Pane,
     right: Pane,
+    center_offset: i32,
     right_source: Option<String>,
     delays: HashMap<String, Delay>,
     active: Side,
     mode: Mode,
     client: Arc<Client>,
+    is_sleep: bool,
+    connections: ConnView,
 }
 
 impl App {
@@ -441,11 +996,14 @@ impl App {
             size: terminal::size()?,
             left: Pane::new("PROXIES", proxies),
             right: Pane::new("MEMBERS", Table::new(Vec::new())),
+            center_offset: 2,
             right_source: None,
             delays: HashMap::new(),
             active: Side::Left,
             mode: Mode::Normal,
             client,
+            is_sleep: false,
+            connections: ConnView::default(),
         };
         app.sync_right();
         Ok(app)
@@ -528,6 +1086,31 @@ impl App {
         }
     }
 
+    fn conn_height(&self) -> usize {
+        usize::from(self.size.1).saturating_sub(4)
+    }
+
+    fn conn_visible(&self) -> bool {
+        matches!(
+            self.mode,
+            Mode::Connections | Mode::Input { conns: true, .. }
+        )
+    }
+
+    fn apply_connections_snapshot(&mut self, snapshot: Snapshot) {
+        let h = self.conn_height();
+        self.connections.apply(snapshot, h);
+    }
+
+    fn set_filter(&mut self, conns: bool, filter: String) {
+        if conns {
+            let h = self.conn_height();
+            self.connections.set_filter(filter, h);
+        } else {
+            self.edit_active(|p, _| p.set_filter(filter));
+        }
+    }
+
     fn edit_active(&mut self, edit: impl FnOnce(&mut Pane, usize)) {
         let height = self.list_height();
         let pane = match self.active {
@@ -543,11 +1126,25 @@ impl App {
         let height = self.list_height();
         self.left.scroll_into_view(height);
         self.right.scroll_into_view(height);
+        self.center_offset = 2;
+        let ch = self.conn_height();
+        self.connections.scroll_into_view(ch);
+    }
+
+    fn resize_pane(&mut self, side: Side, val: i32) {
+        if side == Side::Left {
+            self.center_offset -= val;
+            self.center_offset = self.center_offset.max((self.size.0 / 2) as i32 * -1 + 32);
+        } else {
+            self.center_offset += val;
+            self.center_offset = self.center_offset.min((self.size.0 / 2) as i32 - 32);
+        }
     }
 
     /// Returns `true` when the app should quit.
     async fn handle_key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         if ctrl && key.code == KeyCode::Char('c') {
             return true;
         }
@@ -556,15 +1153,19 @@ impl App {
                 self.handle_input_key(key.code, ctrl);
                 false
             }
-            Mode::Normal => self.handle_normal_key(key.code, ctrl).await,
+            Mode::Normal => self.handle_normal_key(key.code, ctrl, shift).await,
+            Mode::Connections => self.handle_connections_key(key.code, ctrl, shift).await,
         }
     }
 
-    async fn handle_normal_key(&mut self, code: KeyCode, ctrl: bool) -> bool {
+    async fn handle_normal_key(&mut self, code: KeyCode, ctrl: bool, shift: bool) -> bool {
         match code {
             KeyCode::Char('q') => return true,
 
             KeyCode::Enter => {
+                if self.active == Side::Left {
+                    self.active = Side::Right;
+                }
                 let selected_l = self.left.selected().map(|index| {
                     let e = &self.left.table.entries[index];
                     (e.kind.clone(), e.name.clone())
@@ -578,7 +1179,6 @@ impl App {
                     (selected_l, selected_r)
                 {
                     if kind_l == "Selector" {
-                        // режим MEMBERS: левый селектор -> правый член
                         match self.client.select_proxy(&name_l, &name_r).await {
                             Ok(_) => {
                                 if let Some(&index) = self.left.table.by_name.get(&name_l) {
@@ -593,13 +1193,11 @@ impl App {
                     } else if kind_r == "Selector" {
                         match self.client.select_proxy(&name_r, &name_l).await {
                             Ok(_) => {
-                                // правая таблица: селектор теперь смотрит на name_l
                                 if let Some(&index) = self.right.table.by_name.get(&name_r) {
                                     let entry = &mut self.right.table.entries[index];
                                     entry.now = Some(name_l.clone());
                                     self.right.table.widths = measure(&self.right.table.entries);
                                 }
-                                // левая таблица: тот же селектор, обновляем и там
                                 if let Some(&index) = self.left.table.by_name.get(&name_r) {
                                     let entry = &mut self.left.table.entries[index];
                                     entry.now = Some(name_l);
@@ -611,9 +1209,31 @@ impl App {
                     }
                 }
             }
-
-            KeyCode::Char('h') | KeyCode::Left => self.active = Side::Left,
-            KeyCode::Char('l') | KeyCode::Right => self.active = Side::Right,
+            KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => {
+                if !shift {
+                    if self.active == Side::Left {
+                        self.mode = Mode::Connections;
+                    } else {
+                        self.active = Side::Left;
+                    }
+                } else {
+                    self.resize_pane(Side::Left, 1);
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => {
+                if !shift {
+                    if self.active == Side::Right {
+                        self.mode = Mode::Connections;
+                    } else {
+                        self.active = Side::Right;
+                    }
+                } else {
+                    self.resize_pane(Side::Right, 1);
+                }
+            }
+            KeyCode::Char('-') => self.resize_pane(Side::Left, 1),
+            KeyCode::Char('+') => self.resize_pane(Side::Right, 1),
+            KeyCode::Char('=') => self.center_offset = 0,
             KeyCode::Tab => {
                 self.active = match self.active {
                     Side::Left => Side::Right,
@@ -633,35 +1253,99 @@ impl App {
             KeyCode::Char(':' | '/' | 'i') => {
                 self.mode = Mode::Input {
                     saved_filter: self.active_pane().filter.clone(),
+                    conns: false,
                 };
             }
-            KeyCode::Esc => self.edit_active(|p, _| p.set_filter(String::new())),
+            KeyCode::Esc | KeyCode::Char(' ') => {
+                self.edit_active(|p, _| p.set_filter(String::new()))
+            }
+            KeyCode::Char('c') => self.mode = Mode::Connections,
+            _ => {}
+        }
+        false
+    }
+
+    async fn handle_connections_key(&mut self, code: KeyCode, ctrl: bool, _shift: bool) -> bool {
+        let h = self.conn_height();
+        match code {
+            KeyCode::Char('q') => return true,
+            KeyCode::Char('K') => {
+                let conn_id = self
+                    .connections
+                    .selected()
+                    .map(|i| self.connections.rows[i].id.as_str())
+                    .unwrap_or("");
+                if !conn_id.is_empty() {
+                    let _ = self.client.close_connection(conn_id).await;
+                }
+            }
+            KeyCode::Char('X') => {
+                let _ = self.client.close_all_connections().await;
+            }
+            KeyCode::Esc => {
+                if self.connections.filter.is_empty() {
+                    self.mode = Mode::Normal;
+                } else {
+                    self.connections.set_filter(String::new(), h);
+                }
+            }
+            KeyCode::Char('c') => self.mode = Mode::Normal,
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.active = Side::Right;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.active = Side::Left;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char(' ') => self.connections.set_filter(String::new(), h),
+            KeyCode::Char('j') | KeyCode::Down => self.connections.move_by(1, h),
+            KeyCode::Char('k') | KeyCode::Up => self.connections.move_by(-1, h),
+            KeyCode::Char('d') if ctrl => self.connections.move_by((h / 2) as isize, h),
+            KeyCode::Char('u') if ctrl => self.connections.move_by(-((h / 2) as isize), h),
+            KeyCode::Char('g') | KeyCode::Home => self.connections.move_to(0, h),
+            KeyCode::Char('G') | KeyCode::End => self.connections.move_to(usize::MAX, h),
+            KeyCode::Char(':' | '/' | 'i') => {
+                self.mode = Mode::Input {
+                    saved_filter: self.connections.filter.clone(),
+                    conns: true,
+                };
+            }
             _ => {}
         }
         false
     }
 
     fn handle_input_key(&mut self, code: KeyCode, ctrl: bool) {
+        let conns = matches!(self.mode, Mode::Input { conns: true, .. });
+        let back = if conns {
+            Mode::Connections
+        } else {
+            Mode::Normal
+        };
+        let current = if conns {
+            self.connections.filter.clone()
+        } else {
+            self.active_pane().filter.clone()
+        };
         match code {
-            KeyCode::Enter => self.mode = Mode::Normal,
+            KeyCode::Enter => self.mode = back,
             KeyCode::Esc => {
-                if let Mode::Input { saved_filter } =
-                    std::mem::replace(&mut self.mode, Mode::Normal)
-                {
-                    self.edit_active(|p, _| p.set_filter(saved_filter));
+                if let Mode::Input { saved_filter, .. } = std::mem::replace(&mut self.mode, back) {
+                    self.set_filter(conns, saved_filter);
                 }
             }
-            KeyCode::Backspace => self.edit_active(|p, _| {
-                let mut filter = std::mem::take(&mut p.filter);
-                filter.pop();
-                p.set_filter(filter);
-            }),
-            KeyCode::Char('u') if ctrl => self.edit_active(|p, _| p.set_filter(String::new())),
-            KeyCode::Char(ch) if !ctrl => self.edit_active(|p, _| {
-                let mut filter = std::mem::take(&mut p.filter);
-                filter.push(ch);
-                p.set_filter(filter);
-            }),
+            KeyCode::Backspace => {
+                let mut f = current;
+                f.pop();
+                self.set_filter(conns, f);
+            }
+            KeyCode::Char('u') if ctrl => self.set_filter(conns, String::new()),
+            KeyCode::Char(ch) if !ctrl => {
+                let mut f = current;
+                f.push(ch);
+                self.set_filter(conns, f);
+            }
             _ => {}
         }
     }
@@ -677,15 +1361,24 @@ impl App {
             )?;
             return out.flush();
         }
-
+        if self.conn_visible() {
+            draw_connections(out, &self.connections, cols, rows, self.is_sleep)?;
+            self.draw_footer(out)?;
+            return out.flush();
+        }
         let height = self.list_height();
-        let left_width = cols / 2;
+
+        let half = (cols as i32) / 2 + self.center_offset;
+        let left_width = half.clamp(2, cols as i32 - 3) as u16;
+        let sep_x = left_width;
+        let right_x = sep_x + 1;
+        let right_width = cols - right_x;
 
         for y in 0..rows - 1 {
             queue!(
                 out,
-                cursor::MoveTo(left_width - 1, y),
-                SetForegroundColor(Color::DarkGrey),
+                cursor::MoveTo(sep_x, y),
+                SetForegroundColor(Color::White),
                 Print('│'),
                 ResetColor
             )?;
@@ -694,9 +1387,10 @@ impl App {
             out,
             &self.left,
             0,
-            usize::from(left_width - 1),
+            left_width as usize,
             height,
             self.active == Side::Left,
+            self.is_sleep,
             Highlight::None,
         )?;
         let highlight = match self.left.selected().map(|i| &self.left.table.entries[i]) {
@@ -707,10 +1401,11 @@ impl App {
         draw_pane(
             out,
             &self.right,
-            left_width,
-            usize::from(cols - left_width),
+            right_x,
+            right_width as usize,
             height,
             self.active == Side::Right,
+            self.is_sleep,
             highlight,
         )?;
         self.draw_footer(out)?;
@@ -719,25 +1414,37 @@ impl App {
 
     fn draw_footer(&self, out: &mut impl Write) -> io::Result<()> {
         let (cols, rows) = self.size;
-        queue!(out, cursor::MoveTo(0, rows - 1))?;
+        queue!(
+            out,
+            SetAttribute(Attribute::Reverse),
+            cursor::MoveTo(0, rows - 1)
+        )?;
         match self.mode {
             Mode::Input { .. } => {
-                let text = format!(" /{}", self.active_pane().filter);
+                let filter = if self.conn_visible() {
+                    &self.connections.filter
+                } else {
+                    &self.active_pane().filter
+                };
+                let text = format!(" /{}", filter);
                 let caret = text.width().min(usize::from(cols) - 1) as u16;
-                queue!(
-                    out,
-                    Print(fit(&text, usize::from(cols), Align::Left)),
-                    cursor::MoveTo(caret, rows - 1),
-                    cursor::Show
-                )
+                queue!(out, cursor::MoveTo(0, rows - 1))?;
+                write_fit(out, &text, usize::from(cols), Align::Left)?;
+                queue!(out, cursor::MoveTo(caret, rows - 1), cursor::Show)
             }
-            Mode::Normal => queue!(
-                out,
-                SetForegroundColor(Color::DarkGrey),
-                Print(fit(HINT, usize::from(cols), Align::Left)),
-                ResetColor,
-                cursor::Hide
-            ),
+            Mode::Normal | Mode::Connections => {
+                if self.is_sleep {
+                    queue!(out, SetForegroundColor(Color::Magenta))?;
+                } else {
+                    queue!(out, SetForegroundColor(Color::White))?;
+                }
+                let hint = if matches!(self.mode, Mode::Connections) {
+                    CONN_HINT
+                } else {
+                    HINT
+                };
+                write_fit(out, hint, usize::from(cols), Align::Left)
+            }
         }
     }
 }
@@ -753,11 +1460,8 @@ fn write_line(
         if i > 0 {
             queue!(out, Print(GAP))?;
         }
-        queue!(
-            out,
-            SetForegroundColor(color),
-            Print(fit(text, widths[i], ALIGNS[i]))
-        )?;
+        queue!(out, SetForegroundColor(color))?;
+        write_fit(out, text, widths[i], ALIGNS[i])?;
     }
     queue!(out, ResetColor, SetAttribute(Attribute::Reset))
 }
@@ -784,7 +1488,7 @@ fn write_entry(
     widths: &[usize; COLUMNS],
     attr: Attribute,
     entry: &Entry,
-    highlight: Highlight,
+    selected: Highlight,
 ) -> io::Result<()> {
     let members = if entry.members.is_empty() {
         "-".to_owned()
@@ -792,20 +1496,20 @@ fn write_entry(
         entry.members.len().to_string()
     };
     let members_color = if entry.members.is_empty() {
-        Color::DarkGrey
+        Color::White
     } else {
         Color::Reset
     };
     let now_color = if entry.now.is_some() {
         Color::Reset
     } else {
-        Color::DarkGrey
+        Color::White
     };
     let (delay, delay_color) = entry.delay.display();
-    let name_color = if highlight.matches(entry) {
-        Color::Green
+    let (name_color, name) = if selected.matches(entry) {
+        (Color::Green, format!("·{}", entry.name))
     } else {
-        Color::Reset
+        (Color::Reset, entry.name.clone())
     };
     write_line(
         out,
@@ -813,7 +1517,7 @@ fn write_entry(
         attr,
         [
             (entry.kind.as_str(), kind_color(&entry.kind)),
-            (entry.name.as_str(), name_color),
+            (name.as_str(), name_color),
             (members.as_str(), members_color),
             (entry.now.as_deref().unwrap_or("-"), now_color),
             (delay.as_str(), delay_color),
@@ -828,22 +1532,22 @@ fn draw_pane(
     width: usize,
     height: usize,
     active: bool,
+    sleep: bool,
     highlight: Highlight,
 ) -> io::Result<()> {
+    let title_raw = format!(" {} ", pane.title);
     let counter = format!("{}/{} ", pane.table.visible.len(), pane.table.entries.len());
-    let title = format!(" {} ", pane.title);
-    let title_width = title.width().min(width.saturating_sub(counter.width()));
-    let title = fit(&title, title_width, Align::Left);
-    let filter = if pane.filter.is_empty() {
+    let title_width = title_raw.width().min(width.saturating_sub(counter.width()));
+
+    let filter_raw = if pane.filter.is_empty() {
         String::new()
     } else {
         format!(" /{}", pane.filter)
     };
-    let filter = fit(
-        &filter,
-        width.saturating_sub(title_width + counter.width()),
-        Align::Left,
-    );
+    let used = title_width + counter.width();
+    let rest = width.saturating_sub(used);
+    let filter_width = filter_raw.width().min(rest);
+    let pad_width = rest.saturating_sub(filter_width);
 
     queue!(out, cursor::MoveTo(x, 0))?;
     if active {
@@ -853,19 +1557,29 @@ fn draw_pane(
             SetAttribute(Attribute::Bold)
         )?;
     } else {
-        queue!(out, SetForegroundColor(Color::DarkGrey))?;
+        queue!(out, SetAttribute(Attribute::Underlined))?;
     }
-    queue!(
-        out,
-        Print(title),
-        SetAttribute(Attribute::Reset),
-        ResetColor,
-        SetForegroundColor(Color::Yellow),
-        Print(filter),
-        SetForegroundColor(Color::DarkGrey),
-        Print(counter),
-        ResetColor
-    )?;
+    if sleep {
+        queue!(out, SetForegroundColor(Color::Magenta))?;
+    }
+
+    // title
+    write_fit(out, &title_raw, title_width, Align::Left)?;
+    queue!(out, SetAttribute(Attribute::Reset), ResetColor)?;
+
+    queue!(out, SetAttribute(Attribute::Underlined))?;
+    queue!(out, SetForegroundColor(Color::Yellow))?;
+    write_fit(out, &filter_raw, filter_width, Align::Left)?;
+    if pad_width > 0 {
+        write_pad(out, pad_width)?;
+    }
+    queue!(out, ResetColor)?;
+
+    // counter
+    queue!(out, SetForegroundColor(Color::White))?;
+    queue!(out, SetAttribute(Attribute::Underlined))?;
+    queue!(out, Print(counter.as_str()))?;
+    queue!(out, SetAttribute(Attribute::Reset))?;
 
     let widths = pane.table.layout(width);
     queue!(out, cursor::MoveTo(x, 1))?;
@@ -873,8 +1587,13 @@ fn draw_pane(
         out,
         &widths,
         Attribute::Bold,
-        HEADERS.map(|header| (header, Color::DarkGrey)),
+        HEADERS.map(|header| (header, Color::White)),
     )?;
+    let used = 1 + widths.iter().sum::<usize>() + GAP.len() * (COLUMNS - 1);
+    if used < width {
+        write_pad(out, width - used)?;
+    }
+    queue!(out, SetAttribute(Attribute::Reset), ResetColor)?;
 
     for line in 0..height {
         let position = pane.top + line;
@@ -883,10 +1602,14 @@ fn draw_pane(
             Some(&index) => {
                 let attr = match (position == pane.cursor, active) {
                     (true, true) => Attribute::Reverse,
-                    (true, false) => Attribute::Bold,
+                    (true, false) => Attribute::Underlined,
                     _ => Attribute::Reset,
                 };
                 write_entry(out, &widths, attr, &pane.table.entries[index], highlight)?;
+                let used = 1 + widths.iter().sum::<usize>() + GAP.len() * (COLUMNS - 1);
+                if used < width {
+                    write_pad(out, width - used)?;
+                }
             }
             None => queue!(out, Print(" ".repeat(width)))?,
         }
@@ -894,160 +1617,290 @@ fn draw_pane(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct SharedState {
-    last_active: Instant,
+async fn wait_active(rx: &mut watch::Receiver<bool>) -> bool {
+    rx.wait_for(|a| *a).await.is_ok()
 }
 
-impl SharedState {
-    fn new() -> Self {
-        Self {
-            last_active: Instant::now(),
+fn spawn_input_thread(
+    tx: mpsc::UnboundedSender<Msg>,
+    last_active: Arc<std::sync::Mutex<Instant>>,
+    active_tx: Arc<watch::Sender<bool>>,
+) {
+    std::thread::spawn(move || {
+        loop {
+            let event = event::read();
+            let failed = event.is_err();
+            *last_active.lock().unwrap() = Instant::now();
+            active_tx.send_if_modified(|a| !std::mem::replace(a, true));
+            if tx.send(Msg::Term(event)).is_err() || failed {
+                break;
+            }
         }
-    }
+    });
 }
 
-pub async fn run(args: &crate::cli::Args) -> crate::Result<()> {
-    let client = Arc::new(args.build_singbox_clash_api_client()?);
-    let url = args.url.clone();
+fn spawn_idle_watcher(
+    tx: mpsc::UnboundedSender<Msg>,
+    last_active: Arc<std::sync::Mutex<Instant>>,
+    active_tx: Arc<watch::Sender<bool>>,
+) {
+    tokio::spawn(async move {
+        let start = Instant::now() + Duration::from_secs(1);
+        let mut tick = time::interval_at(start, Duration::from_secs(1));
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut n: u32 = 0;
+        loop {
+            tick.tick().await;
+            n = n.wrapping_add(1);
+
+            let idle = last_active.lock().unwrap().elapsed() > SLEEP_TIMEOUT;
+            let msg = if !idle {
+                Some(Msg::Sleep(false))
+            } else if active_tx.send_if_modified(|a| std::mem::replace(a, false)) {
+                Some(Msg::Sleep(true))
+            } else if n % 5 == 0 {
+                Some(Msg::Redraw)
+            } else {
+                None
+            };
+
+            if let Some(msg) = msg {
+                if tx.send(msg).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_connections_poller(
+    client: Arc<Client>,
+    tx: mpsc::UnboundedSender<Msg>,
+    mut active_rx: watch::Receiver<bool>,
+    mut conns_open_rx: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let period = if *conns_open_rx.borrow() {
+                Duration::from_secs(1)
+            } else {
+                CONNECTIONS_REFRESH_BACKGROUND
+            };
+            let sleep = time::sleep(period);
+            tokio::pin!(sleep);
+            tokio::select! {
+                _ = &mut sleep => {}
+                _ = conns_open_rx.changed() => continue,
+            }
+
+            if !wait_active(&mut active_rx).await {
+                break;
+            }
+            if let Ok(snapshot) = client.connections().await {
+                if tx.send(Msg::Snapshot(snapshot)).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_proxies_poller(
+    client: Arc<Client>,
+    tx: mpsc::UnboundedSender<Msg>,
+    mut active_rx: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let start = Instant::now() + PROXIES_REFRESH;
+        let mut tick = time::interval_at(start, PROXIES_REFRESH);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            if !wait_active(&mut active_rx).await {
+                break;
+            }
+            if let Ok(proxies) = client.proxies().await {
+                if tx
+                    .send(Msg::Proxies(entries_from_proxies(proxies)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+async fn probe_all(
+    client: &Arc<Client>,
+    tx: &mpsc::UnboundedSender<Msg>,
+    semaphore: &Arc<Semaphore>,
+    url: &Arc<str>,
+    timeout: Duration,
+    probes: Vec<String>,
+) {
+    let mut set = JoinSet::new();
+    for probe in probes {
+        let client = Arc::clone(client);
+        let semaphore = Arc::clone(semaphore);
+        let tx = tx.clone();
+        let url = Arc::clone(url);
+        set.spawn(async move {
+            let Ok(_permit) = semaphore.acquire().await else {
+                return;
+            };
+            let delay = match client.proxy_delay(&probe, &url, timeout).await {
+                Ok(d) => Delay::Success {
+                    ms: d.as_millis().min(u128::from(u16::MAX)) as u16,
+                    at: Instant::now(),
+                },
+                Err(_) => Delay::Fail,
+            };
+            let _ = tx.send(Msg::Delay { probe, delay });
+        });
+    }
+    while set.join_next().await.is_some() {}
+}
+
+fn spawn_delay_prober(
+    client: Arc<Client>,
+    tx: mpsc::UnboundedSender<Msg>,
+    mut active_rx: watch::Receiver<bool>,
+    mut conns_open_rx: watch::Receiver<bool>,
+    targets_rx: watch::Receiver<Vec<String>>,
+    url: Arc<str>,
+    timeout: Duration,
+) {
+    tokio::spawn(async move {
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_PROBES));
+        let mut last_probe: Option<Instant> = None;
+
+        loop {
+            if let Some(last) = last_probe {
+                let period = if *conns_open_rx.borrow() {
+                    DELAY_INTERVAL_CONNECTIONS
+                } else {
+                    DELAY_INTERVAL
+                };
+                let sleep = time::sleep_until(last + period);
+                tokio::pin!(sleep);
+                tokio::select! {
+                    _ = &mut sleep => {}
+                    res = conns_open_rx.changed() => {
+                        if res.is_err() { break; }
+                        continue;
+                    }
+                }
+            }
+
+            if !wait_active(&mut active_rx).await {
+                break;
+            }
+
+            let probes = targets_rx.borrow().clone();
+            last_probe = Some(Instant::now());
+            probe_all(&client, &tx, &semaphore, &url, timeout, probes).await;
+
+            if tx.is_closed() {
+                break;
+            }
+        }
+    });
+}
+
+async fn handle_msg(
+    msg: Msg,
+    app: &mut App,
+    out: &mut BufWriter<io::Stdout>,
+    conns_open_tx: &watch::Sender<bool>,
+    targets_tx: &watch::Sender<Vec<String>>,
+) -> crate::Result<bool> {
+    match msg {
+        Msg::Term(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+            let was_conns = app.conn_visible();
+            if app.handle_key(key).await {
+                return Ok(true);
+            }
+            let now_conns = app.conn_visible();
+            if was_conns != now_conns {
+                conns_open_tx.send(now_conns).ok();
+            }
+        }
+        Msg::Term(event) => {
+            if let Event::Resize(cols, rows) = event? {
+                app.resize(cols, rows);
+                queue!(out, Clear(ClearType::All))?;
+            }
+        }
+        Msg::Delay { probe, delay } => app.apply_delay(probe, delay),
+        Msg::Proxies(entries) => {
+            app.apply_proxies(entries);
+            let probes = app.probes();
+            targets_tx.send_if_modified(|current| {
+                if *current == probes {
+                    false
+                } else {
+                    *current = probes;
+                    true
+                }
+            });
+        }
+        Msg::Redraw => {}
+        Msg::Sleep(v) => app.is_sleep = v,
+        Msg::Snapshot(snapshot) => app.apply_connections_snapshot(snapshot),
+    }
+    Ok(false)
+}
+
+pub async fn run(args: &crate::cli::Args, client: Client) -> crate::Result<()> {
+    let client = Arc::new(client);
+    let url: Arc<str> = Arc::from(args.url.as_str());
 
     let initial = Table::new(entries_from_proxies(client.proxies().await?));
 
     let _guard = TerminalGuard::new()?;
     let mut out = BufWriter::new(io::stdout());
-    let ss = Arc::new(Mutex::new(SharedState::new()));
     let mut app = App::new(initial, client.clone())?;
+    if let Ok(snapshot) = client.connections().await {
+        app.apply_connections_snapshot(snapshot);
+    }
     app.draw(&mut out)?;
+
+    let last_active = Arc::new(std::sync::Mutex::new(Instant::now()));
+    let (active_tx, active_rx) = watch::channel(true);
+    let active_tx = Arc::new(active_tx);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
     let (targets_tx, targets_rx) = watch::channel(app.probes());
+    let (conns_open_tx, conns_open_rx) = watch::channel(app.conn_visible());
 
-    {
-        let tx = tx.clone();
-        let ss = ss.clone();
-        let mut n = 0;
-        std::thread::spawn(move || {
-            loop {
-                let event = event::read();
-                let failed = event.is_err();
-                if tx.send(Msg::Term(event)).is_err() || failed {
-                    break;
-                }
-                if n % 2 == 0 {
-                    ss.lock().unwrap().last_active = Instant::now();
-                }
-                n += 1;
-            }
-        });
-    }
-
-    {
-        let client = Arc::clone(&client);
-        let ss = ss.clone();
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let start = time::Instant::now() + PROXIES_REFRESH;
-            let mut tick = time::interval_at(start, PROXIES_REFRESH);
-            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                {
-                    let guard = ss.lock().unwrap();
-                    if guard.last_active.elapsed() > SLEEP_TIMEOUT {
-                        continue;
-                    }
-                }
-
-                if let Ok(proxies) = client.proxies().await {
-                    if tx
-                        .send(Msg::Proxies(entries_from_proxies(proxies)))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    {
-        let client = Arc::clone(&client);
-        let ss = ss.clone();
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_PROBES));
-            let mut tick = time::interval(DELAY_INTERVAL); // первый тик — сразу
-            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                {
-                    let guard = ss.lock().unwrap();
-                    if guard.last_active.elapsed() > SLEEP_TIMEOUT {
-                        continue;
-                    }
-                }
-                let probes = targets_rx.borrow().clone();
-
-                let mut set = JoinSet::new();
-                for probe in probes {
-                    let client = Arc::clone(&client);
-                    let semaphore = Arc::clone(&semaphore);
-                    let tx = tx.clone();
-                    let url = url.clone();
-                    set.spawn(async move {
-                        let Ok(_permit) = semaphore.acquire().await else {
-                            return;
-                        };
-                        let delay = match client.proxy_delay(&probe, &url, PROBE_TIMEOUT).await {
-                            Ok(d) => Delay::Success {
-                                ms: d.as_millis().min(u128::from(u16::MAX)) as u16,
-                                at: Instant::now(),
-                            },
-                            Err(_) => Delay::Fail,
-                        };
-                        let _ = tx.send(Msg::Delay { probe, delay });
-                    });
-                }
-                while set.join_next().await.is_some() {}
-
-                if tx.is_closed() {
-                    break;
-                }
-            }
-        });
-    }
+    spawn_input_thread(tx.clone(), last_active.clone(), active_tx.clone());
+    spawn_idle_watcher(tx.clone(), last_active, active_tx);
+    spawn_connections_poller(
+        client.clone(),
+        tx.clone(),
+        active_rx.clone(),
+        conns_open_rx.clone(),
+    );
+    spawn_proxies_poller(client.clone(), tx.clone(), active_rx.clone());
+    spawn_delay_prober(
+        client,
+        tx.clone(),
+        active_rx,
+        conns_open_rx,
+        targets_rx,
+        url,
+        Duration::from_millis(args.timeout_ms),
+    );
+    drop(tx);
 
     'main: loop {
         let Some(first) = rx.recv().await else { break };
 
         let mut next = Some(first);
         while let Some(msg) = next.take().or_else(|| rx.try_recv().ok()) {
-            match msg {
-                Msg::Term(event) => match event? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        if app.handle_key(key).await {
-                            break 'main;
-                        }
-                    }
-                    Event::Resize(cols, rows) => {
-                        app.resize(cols, rows);
-                        queue!(out, Clear(ClearType::All))?;
-                    }
-                    _ => {}
-                },
-                Msg::Delay { probe, delay } => app.apply_delay(probe, delay),
-                Msg::Proxies(entries) => {
-                    app.apply_proxies(entries);
-                    let probes = app.probes();
-                    targets_tx.send_if_modified(|current| {
-                        if *current == probes {
-                            false
-                        } else {
-                            *current = probes;
-                            true
-                        }
-                    });
-                }
+            if handle_msg(msg, &mut app, &mut out, &conns_open_tx, &targets_tx).await? {
+                break 'main;
             }
         }
 

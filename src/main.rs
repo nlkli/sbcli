@@ -1,13 +1,11 @@
 mod cli;
+mod interactive;
 mod link;
 mod models;
-mod interactive;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::io::{BufRead, Write};
 use std::time::Duration;
-
-use singbox_clash_api::Client;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -113,10 +111,11 @@ fn main() -> Result<()> {
 }
 
 async fn run_api(args: &cli::Args) -> Result<()> {
-    interactive::run(args).await;
-    return Ok(());
-
     let client = args.build_singbox_clash_api_client()?;
+
+    if args.interactive {
+        return interactive::run(args, client).await;
+    }
 
     if args.proxies {
         print_json(

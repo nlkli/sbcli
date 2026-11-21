@@ -81,6 +81,7 @@ impl<'de> Deserialize<'de> for AnyOutbound {
     }
 }
 
+#[allow(dead_code)]
 impl AnyOutbound {
     pub fn tag(&self) -> &str {
         match self {

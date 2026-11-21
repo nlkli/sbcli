@@ -11,6 +11,7 @@ pub use dial_fields::*;
 pub use http2_quic_fields::*;
 pub use http_client::*;
 pub use multiplex::*;
+#[allow(unused_imports)]
 pub use tcp_brutal::*;
 pub use tls::*;
 pub use udp_over_tcp::*;

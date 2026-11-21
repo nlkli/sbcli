@@ -1,6 +1,7 @@
 use crate::omit_empty;
 
 omit_empty! {
+#[allow(dead_code)]
 /// HTTP2 fields.
 /// Docs: https://sing-box.sagernet.org/configuration/shared/http2/
 pub struct Http2Fields {
@@ -22,6 +23,7 @@ pub struct Http2Fields {
 }
 
 omit_empty! {
+#[allow(dead_code)]
 /// QUIC fields. Extends HTTP2 fields.
 /// Docs: https://sing-box.sagernet.org/configuration/shared/quic/
 pub struct QuicFields {
