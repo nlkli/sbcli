@@ -42,6 +42,8 @@ pub struct Args {
     pub token: Option<String>,
 
     pub uuid_tag: bool,
+
+    pub interactive: bool,
 }
 
 impl Args {
@@ -92,6 +94,7 @@ impl Args {
                     "groups" => args.groups = true,
                     "rules" => args.rules = true,
                     "connections" => args.connections = true,
+                    "interactive" => args.interactive = true,
                     "close-all-connections" => args.close_all_connections = true,
                     "flush-fakeip-cache" => args.flush_fakeip_cache = true,
                     "flush-dns-cache" => args.flush_dns_cache = true,
@@ -122,6 +125,7 @@ impl Args {
                         'N' => args.flush_dns_cache = true,
                         'U' => args.upgrade_ui = true,
                         'Z' => args.uuid_tag = true,
+                        'i' => args.interactive = true,
                         'h' => {
                             println!("{}", help());
                             std::process::exit(0);
@@ -186,6 +190,16 @@ impl Args {
 
         args
     }
+
+    pub fn build_singbox_clash_api_client(&self) -> crate::Result<singbox_clash_api::Client> {
+        let mut builder = singbox_clash_api::Client::builder(&self.api);
+
+        if let Some(ref t) = self.token {
+            builder = builder.secret(t);
+        }
+
+        Ok(builder.build()?)
+    }
 }
 
 const VERSION: &str = concat!(
@@ -204,6 +218,7 @@ Usage: sbcli [OPTIONS]
   -a, --api <URL>                   Controller URL [env: SINGBOX_CLASH_API]
                                     [default: http://127.0.0.1:9090]
   -T, --token <TOKEN>               Bearer token (secret)
+  -i, --interactive                 Interactive mode
 Proxies
   -P, --proxies                     List proxies
   -p, --proxy <NAME>                Show a proxy

@@ -1,6 +1,7 @@
 mod cli;
 mod link;
 mod models;
+mod interactive;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::io::{BufRead, Write};
@@ -74,6 +75,7 @@ fn main() -> Result<()> {
     }
 
     let has_api_cmd = args.proxies
+        || args.interactive
         || args.proxy.is_some()
         || !args.select.is_empty()
         || !args.select_random.is_empty()
@@ -107,17 +109,14 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
 
-    rt.block_on(run_api(args))
+    rt.block_on(run_api(&args))
 }
 
-async fn run_api(args: cli::Args) -> Result<()> {
-    let mut builder = Client::builder(&args.api);
+async fn run_api(args: &cli::Args) -> Result<()> {
+    interactive::run(args).await;
+    return Ok(());
 
-    if let Some(ref t) = args.token {
-        builder = builder.secret(t);
-    }
-
-    let client = builder.build()?;
+    let client = args.build_singbox_clash_api_client()?;
 
     if args.proxies {
         print_json(
