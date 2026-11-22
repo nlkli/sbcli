@@ -14,8 +14,9 @@ A small, fast command-line client for the [sing-box](https://github.com/SagerNet
 ### Build
 
 ```sh
-cargo build --release
-./target/release/sbcli -h
+git clone https://github.com/nlkli/sbcli
+sd sbcli
+cargo b -r && ./target/release/sbcli -h
 ```
 
 ### Homebrew
