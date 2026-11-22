@@ -31,7 +31,7 @@ const ALIGNS: [Align; COLUMNS] = [
 ];
 const DELAY_STALE_AFTER: Duration = Duration::from_secs(15);
 const HINT: &str =
-    " Enter select | c conns | / filter | esc clear | h/l pane | j/k move | o open | q quit";
+    " Enter select | c conns | / filter | esc clear | h/j/k/l move | o open | q quit";
 const CONN_COLS: usize = 8;
 const CONN_HEADERS: [&str; CONN_COLS] = [
     "NET",
@@ -53,7 +53,7 @@ const CONN_ALIGNS: [Align; CONN_COLS] = [
     Align::Right,
     Align::Right,
 ];
-const CONN_HINT: &str = " K kill | X all | V visible | c/esc back | q quit | o open | j/k move";
+const CONN_HINT: &str = " K kill | X all | V visible | c/esc back | h/j/k/l move | o open | q quit";
 
 const DELAY_INTERVAL: Duration = Duration::from_secs(5);
 const DELAY_INTERVAL_CONNECTIONS: Duration = Duration::from_secs(14);
