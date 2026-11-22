@@ -58,46 +58,35 @@ A terminal UI for managing sing-box without retyping commands:
 
 ![server-interactive-demo-gif](https://github.com/nlkli/assetsrepo/blob/main/sbcli.demo/server-interactive-demo.gif)
 
-### Proxies and groups
-
-| Option | Description |
-|---|---|
-| `-P, --proxies` | List proxies |
-| `-p, --proxy <NAME>` | Show a proxy |
-| `-G, --groups` | List groups |
-| `-g, --group <NAME>` | Show a group |
-| `-s, --select <GROUP> <NAME>` | Select a group member |
-| `-S, --select-rand <GROUP>` | Select a random group member |
-| `-d, --proxy-delay <NAME>` | Test a proxy's delay |
-| `-D, --group-delay <NAME>` | Test a group's delay |
-| `-u, --url <URL>` | Probe URL (default: gstatic 204) |
-| `-t, --timeout <MS>` | Probe timeout (default: 5000) |
-
-### Rules and connections
-
-| Option | Description |
-|---|---|
-| `-R, --rules` | List rules |
-| `-C, --connections` | List connections |
-| `-c, --close-connection <ID>` | Close a connection |
-| `-X, --close-all-connections` | Close all connections |
-
-### DNS
-
-| Option | Description |
-|---|---|
-| `-q, --dns-query <NAME> <TYPE>` | Query DNS (A, AAAA, TXT, ...) |
-| `-N, --flush-dns-cache` | Flush DNS cache |
-| `-F, --flush-fakeip-cache` | Flush fake-IP cache |
-
-### Link converter
-
-| Option | Description |
-|---|---|
-| `-l, --links-to-outbounds <SRC>` | Convert a file of links (one per line) to outbounds JSON |
-| `-L, --links-from-outbounds <SRC>` | Convert an outbounds JSON file to links |
-| `-Z, --uuid-tag` | Rewrite tags to random UUIDs |
-| `-o, --output <DST>` | Output file for the preceding `-l` / `-L` (default: stdout) |
+```text
+Proxies
+  -P, --proxies                     List proxies
+  -p, --proxy <NAME>                Show a proxy
+  -s, --select <GROUP> <NAME>       Select a group member
+  -S, --select-rand <GROUP>         Select a random group member
+  -d, --proxy-delay <NAME>          Test a proxy delay
+Groups
+  -G, --groups                      List groups
+  -g, --group <NAME>                Show a group
+  -D, --group-delay <NAME>          Test a group delay
+Delay test
+  -u, --url <URL>                   Probe URL [default: gstatic 204]
+  -t, --timeout <MS>                Probe timeout [default: 5000]
+Rules and connections
+  -R, --rules                       List rules
+  -C, --connections                 List connections
+  -c, --close-connection <ID>       Close a connection
+  -X, --close-all-connections       Close all connections
+DNS
+  -q, --dns-query <NAME> <TYPE>     Query DNS (A, AAAA, TXT, ...)
+  -N, --flush-dns-cache             Flush DNS cache
+  -F, --flush-fakeip-cache          Flush fake-IP cache
+Link converter
+  -l, --links-to-outbounds <SRC>    Convert links to outbounds
+  -L, --links-from-outbounds <SRC>  Convert outbounds to links
+  -Z, --uuid-tag                    Rewrite tags to random UUIDs
+  -o, --output <DST>                Output file for the preceding -l/-L
+```
 
 Short flags can be combined, e.g. `-lZ`.
 
