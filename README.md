@@ -8,16 +8,27 @@ A small, fast command-line client for the [sing-box](https://github.com/SagerNet
 
 - Inspect and control proxies, groups, rules and connections
 - Select group members (manually or randomly) and test proxy/group delay
-- Query DNS, flush DNS / fake-IP caches
 - Convert proxy links to sing-box outbounds and back
 - Interactive TUI: switch proxies, live delay and connection monitoring, close connections, filter tables
 
-## Build
+### Build
 
 ```sh
 cargo build --release
 ./target/release/sbcli -h
 ```
+
+### Homebrew
+
+[Formula](https://github.com/nlkli/homebrew-tap/blob/main/Formula/sbcli.rb)
+
+```sh
+brew install nlkli/tap/sbcli
+```
+### Release Download
+
+- [macOS (Apple Silicon)](https://github.com/nlkli/sbcli/releases/latest/download/sbcli-macos-arm64.zip)
+- [Linux (x86_64)](https://github.com/nlkli/sbcli/releases/latest/download/sbcli-linux-amd64.zip)
 
 ### Usage
 
