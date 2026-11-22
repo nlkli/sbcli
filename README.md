@@ -58,6 +58,8 @@ A terminal UI for managing sing-box without retyping commands:
 
 ![server-interactive-demo-gif](https://github.com/nlkli/assetsrepo/blob/main/sbcli.demo/server-interactive-demo.gif)
 
+## CLI Args
+
 ```text
 Proxies
   -P, --proxies                     List proxies
