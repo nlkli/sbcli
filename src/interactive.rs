@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
+use std::fmt::{self, Display};
 use std::io::{self, BufWriter, Write};
 use std::sync::Arc;
 
@@ -21,7 +23,7 @@ const SCROLLOFF: usize = 5;
 const MIN_SIZE: (u16, u16) = (42, 8);
 const GAP: &str = "  ";
 const COLUMNS: usize = 5;
-const HEADERS: [&str; COLUMNS] = ["TYPE", "NAME", "MEM", "NOW", "MS"];
+const HEADERS: [&str; COLUMNS] = ["TYPE", "NAME", "M", "NOW", "MS"];
 const ALIGNS: [Align; COLUMNS] = [
     Align::Left,
     Align::Left,
@@ -29,6 +31,7 @@ const ALIGNS: [Align; COLUMNS] = [
     Align::Left,
     Align::Right,
 ];
+const DELAY_CAP: usize = 24;
 const DELAY_STALE_AFTER: Duration = Duration::from_secs(15);
 const HINT: &str =
     " Enter select | c conns | / filter | esc clear | h/j/k/l move | o open | q quit";
@@ -55,13 +58,14 @@ const CONN_ALIGNS: [Align; CONN_COLS] = [
 ];
 const CONN_HINT: &str = " K kill | X all | V visible | c/esc back | h/j/k/l move | o open | q quit";
 
-const DELAY_INTERVAL: Duration = Duration::from_secs(5);
-const DELAY_INTERVAL_CONNECTIONS: Duration = Duration::from_secs(14);
-const PROXIES_REFRESH: Duration = Duration::from_secs(21);
-const CONNECTIONS_REFRESH_BACKGROUND: Duration = Duration::from_secs(14);
-const MAX_CONCURRENT_PROBES: usize = 50;
+const PROXY_DELAY_INTERVAL: Duration = Duration::from_secs(5);
+const BACKGROUNG_PROXY_DELAY_INTERVAL: Duration = Duration::from_secs(14);
+const PROXIES_REFRESH_INTERVAL: Duration = Duration::from_secs(21);
+const CONNECTIONS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const BACKGROUND_CONNECTIONS_REFRESH_INTERVAL: Duration = Duration::from_secs(14);
+const DELAY_MAX_CONCURRENT_PROBES: usize = 50;
 
-const SLEEP_TIMEOUT: Duration = Duration::from_secs(45);
+const SLEEP_TIMEOUT: Duration = Duration::from_secs(60);
 
 macro_rules! reset_term {
     ($out:expr) => {
@@ -79,12 +83,12 @@ enum Align {
     Right,
 }
 
-const PAD: &[u8] = b"                                                                                                                ";
+const PAD: &str = "                                                                                                                ";
 
 fn write_pad(out: &mut impl Write, mut n: usize) -> io::Result<()> {
     while n > 0 {
         let chunk = n.min(PAD.len());
-        out.write_all(&PAD[..chunk])?;
+        out.write_all(&PAD[..chunk].as_bytes())?;
         n -= chunk;
     }
     Ok(())
@@ -106,7 +110,6 @@ fn write_fit(out: &mut impl Write, text: &str, width: usize, align: Align) -> io
         }
         return Ok(());
     }
-
     let mut used = 0usize;
     let mut end = 0usize;
     for (i, ch) in text.char_indices() {
@@ -164,14 +167,21 @@ impl Drop for TerminalGuard {
 enum Delay {
     None,
     Success { ms: u16, at: Instant },
-    Fail,
+    Fail { at: Instant },
 }
 
 impl Delay {
     fn display(&self) -> (String, Color) {
         match *self {
             Delay::None => ("-".into(), Color::White),
-            Delay::Fail => ("X".into(), Color::Red),
+            Delay::Fail { at } => {
+                let color = if at.elapsed() > DELAY_STALE_AFTER {
+                    Color::White
+                } else {
+                    Color::Red
+                };
+                ("X".into(), color)
+            }
             Delay::Success { ms, at } => {
                 let color = if at.elapsed() > DELAY_STALE_AFTER {
                     Color::White
@@ -200,7 +210,7 @@ struct Entry {
     delay: Delay,
     kind_lower: String,
     name_lower: String,
-    popup_mem: [String; 1],
+    popup_mem: [String; 5],
 }
 
 impl Entry {
@@ -213,7 +223,13 @@ impl Entry {
             members,
             now,
             delay: Delay::None,
-            popup_mem: [String::with_capacity(32)],
+            popup_mem: [
+                String::with_capacity(32),
+                String::with_capacity(32),
+                String::with_capacity(32),
+                String::with_capacity(32),
+                String::with_capacity(32),
+            ],
         }
     }
 
@@ -238,20 +254,84 @@ impl Entry {
             .unwrap_or(&self.name)
     }
 
-    fn popup<'a>(&'a mut self, _size: (u16, u16)) -> (&'a [String], &'a str, (u16, u16, u16, u16)) {
-        self.popup_mem[0].clear();
-        self.popup_mem[0].push_str(&self.name);
-        let width = self.popup_mem.iter().map(|s| s.width() as u16).max();
+    fn popup<'a>(
+        &'a mut self,
+        size: (u16, u16),
+        delays: Option<&VecDeque<Delay>>,
+    ) -> (&'a [String], &'a str, (u16, u16, u16, u16)) {
+        const COLSN: u16 = 7;
+
+        let stat = delays.map(DelaysStat::from).unwrap_or_default();
+
+        for s in &mut self.popup_mem {
+            s.clear();
+        }
+        let [name, now, delay, median, prate, ..] = &mut self.popup_mem[..] else {
+            unreachable!()
+        };
+
+        name.push_str(&self.name);
+        now.push_str(self.now.as_deref().unwrap_or("-"));
+
+        let _ = match stat.last {
+            0 => write!(delay, "delay  -"),
+            v => write!(delay, "delay  {v}ms"),
+        };
+        let _ = match stat.median {
+            0 => write!(median, "median -"),
+            v => write!(median, "median {v}ms"),
+        };
+        let _ = match stat.prate {
+            0 => write!(prate, "prate  -"),
+            v => write!(prate, "prate  {v}%"),
+        };
+
+        let width = self
+            .popup_mem
+            .iter()
+            .map(|s| s.width() as u16)
+            .max()
+            .unwrap_or(8)
+            .max(self.kind.width() as u16);
+
         (
             &self.popup_mem,
             self.kind.as_str(),
-            (
-                6,
-                4,
-                (width.unwrap_or(10) + 3).max(self.kind.len() as u16),
-                3,
-            ),
+            (size.0 / 2 - width / 2, size.1 / 2 - COLSN, width + 2, COLSN),
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DelaysStat {
+    last: u16,
+    median: u16,
+    prate: u8,
+}
+
+impl From<&VecDeque<Delay>> for DelaysStat {
+    fn from(value: &VecDeque<Delay>) -> Self {
+        let mut samples: Vec<u16> = value
+            .iter()
+            .filter_map(|d| match d {
+                Delay::Success { ms, .. } => Some(*ms),
+                _ => None,
+            })
+            .collect();
+
+        let Some(&last) = samples.last() else {
+            return Self::default();
+        };
+
+        let prate = (samples.len() * 100 / value.len()) as u8;
+        let mid = samples.len() / 2;
+        let median = *samples.select_nth_unstable(mid).1;
+
+        Self {
+            last,
+            median,
+            prate,
+        }
     }
 }
 
@@ -265,12 +345,17 @@ fn kind_color(kind: &str) -> Color {
     }
 }
 
-fn measure(entries: &[Entry]) -> [usize; COLUMNS] {
+#[inline]
+fn count_digits(n: usize) -> usize {
+    if n == 0 { 1 } else { n.ilog10() as usize + 1 }
+}
+
+fn measure_entrys(entries: &[Entry]) -> [usize; COLUMNS] {
     let mut widths = HEADERS.map(|header| header.width());
     for entry in entries {
         widths[0] = widths[0].max(entry.kind.width());
         widths[1] = widths[1].max(entry.name.width());
-        widths[2] = widths[2].max(entry.members.len().to_string().len());
+        widths[2] = widths[2].max(count_digits(entry.members.len()));
         widths[3] = widths[3].max(entry.now.as_deref().map_or(1, |now| now.width()));
         widths[4] = widths[4].max(entry.delay.display().0.len());
     }
@@ -290,8 +375,6 @@ fn entries_from_proxies(proxies: singbox_clash_api::Proxies) -> Vec<Entry> {
         })
         .collect()
 }
-
-use std::fmt::{self, Display};
 
 fn unix_now() -> i64 {
     SystemTime::now()
@@ -405,7 +488,6 @@ impl ConnRow {
     fn new(c: Connection) -> Self {
         let chain = c.chains.join("›");
         let started = parse_rfc3339(&c.start);
-
         let m = c.metadata;
         let source = addr(m.source_ip, &m.source_port);
         let dest_ip = addr(m.destination_ip, &m.destination_port);
@@ -435,13 +517,13 @@ impl ConnRow {
             started,
             haystack: String::new(),
             popup_mem: [
+                String::with_capacity(32),
                 String::with_capacity(64),
                 String::with_capacity(64),
                 String::with_capacity(64),
                 String::with_capacity(64),
                 String::with_capacity(64),
-                String::with_capacity(64),
-                String::with_capacity(64),
+                String::with_capacity(32),
             ],
         }
     }
@@ -482,7 +564,6 @@ impl ConnRow {
     }
 
     fn detail(&self) -> String {
-        use std::fmt::Write as _;
         let mut s = String::with_capacity(
             48 + self.inbound.len()
                 + self.id.len()
@@ -503,28 +584,50 @@ impl ConnRow {
         s
     }
 
-    fn popup<'a>(&'a mut self, _size: (u16, u16)) -> (&'a [String], &'a str, (u16, u16, u16, u16)) {
-        self.popup_mem[0].clear();
-        self.popup_mem[1].clear();
-        self.popup_mem[2].clear();
-        self.popup_mem[3].clear();
-        self.popup_mem[4].clear();
-        self.popup_mem[5].clear();
-        self.popup_mem[6].clear();
+    fn popup<'a>(&'a mut self, size: (u16, u16)) -> (&'a [String], &'a str, (u16, u16, u16, u16)) {
+        const COLSN: u16 = 9;
 
-        self.popup_mem[0].push_str(&self.inbound);
-        self.popup_mem[1].push_str(&self.source);
-        self.popup_mem[2].push_str(&self.dest);
-        self.popup_mem[3].push_str(&self.dest_ip);
-        self.popup_mem[4].push_str(&self.chain);
-        self.popup_mem[5].push_str(&self.rule);
-        self.popup_mem[6].push_str(&self.process);
+        for s in &mut self.popup_mem {
+            s.clear();
+        }
+        let [head, source, dest, dest_ip, chain, rule, process, ..] = &mut self.popup_mem[..]
+        else {
+            unreachable!()
+        };
 
-        let width = self.popup_mem.iter().map(|s| s.width() as u16).max();
+        head.push_str(&self.inbound);
+        let _ = match self.started {
+            Some(s) => write!(head, " {}", Age(unix_now().saturating_sub(s))),
+            None => write!(head, " -"),
+        };
+        source.push_str(&self.source);
+        dest.push_str(&self.dest);
+        dest_ip.push_str(&self.dest_ip);
+        chain.push_str(&self.chain);
+        rule.push_str(&self.rule);
+        process.push_str(if self.process.is_empty() {
+            "-"
+        } else {
+            &self.process
+        });
+
+        let width = self
+            .popup_mem
+            .iter()
+            .map(|s| s.width() as u16)
+            .max()
+            .unwrap_or(8)
+            .max(4);
+
         (
             &self.popup_mem,
-            "connection",
-            (6, 4, (width.unwrap_or(10) + 3).max(12), 9),
+            "Conn",
+            (
+                (size.0 / 2).saturating_sub(width / 2),
+                (size.1 / 2).saturating_sub(COLSN),
+                width + 2,
+                COLSN,
+            ),
         )
     }
 }
@@ -639,7 +742,7 @@ impl ConnView {
         }
         w[5] = 7;
         w[6] = 7;
-        w[7] = 6;
+        w[7] = 7;
 
         let gaps = 1 + GAP.len() * (CONN_COLS - 1);
         let flex = width.saturating_sub(gaps + w[0] + w[5] + w[6] + w[7]);
@@ -702,7 +805,7 @@ fn draw_connections(
     reset_term!(out)?;
 
     // title bar
-    let title = " CONNECTIONS ";
+    const TITLE: &str = " CONNECTIONS ";
     let stat = format!(
         "↑{} ↓{} mem {} ",
         Bytes(view.upload_total),
@@ -710,45 +813,43 @@ fn draw_connections(
         Bytes(view.memory),
     );
     let counter = format!(" {}/{} ", view.visible.len(), view.rows.len());
-    let title_w = title
-        .width()
-        .min(width.saturating_sub(stat.width() + counter.width()));
+    let right_w = stat.width() + counter.width();
+    let title_w = TITLE.width().min(width.saturating_sub(right_w));
+    let rest = width.saturating_sub(title_w + right_w);
     let filter_raw = if view.filter.is_empty() {
         String::new()
     } else {
         format!(" /{}", view.filter)
     };
-    let rest = width.saturating_sub(title_w + stat.width() + counter.width());
     let filter_w = filter_raw.width().min(rest);
-    let pad = rest - filter_w;
 
     queue!(
         out,
         cursor::MoveTo(0, 0),
         SetAttribute(Attribute::Reverse),
-        SetAttribute(Attribute::Bold)
+        SetAttribute(Attribute::Bold),
     )?;
     if sleep {
         queue!(out, SetForegroundColor(Color::Magenta))?;
     }
-    write_fit(out, title, title_w, Align::Left)?;
+    write_fit(out, TITLE, title_w, Align::Left)?;
     reset_term!(out)?;
     queue!(
         out,
         ResetColor,
         SetAttribute(Attribute::Underlined),
-        SetForegroundColor(Color::Yellow)
+        SetForegroundColor(Color::Yellow),
     )?;
-    write_fit(out, &filter_raw, filter_w, Align::Left)?;
-    write_pad(out, pad)?;
+    write_fit(out, &filter_raw, filter_w.saturating_sub(1), Align::Left)?;
+    write_pad(out, rest - filter_w)?;
     queue!(
         out,
         SetForegroundColor(Color::Cyan),
-        Print(stat.as_str()),
+        Print(&stat),
         SetForegroundColor(Color::White),
-        Print(counter.as_str()),
+        Print(&counter),
         SetAttribute(Attribute::Reset),
-        ResetColor
+        ResetColor,
     )?;
 
     // header
@@ -764,58 +865,55 @@ fn draw_connections(
 
     // rows
     let now = unix_now();
-    let mut up = String::with_capacity(8);
-    let mut down = String::with_capacity(8);
-    let mut age = String::with_capacity(8);
+    let (mut up, mut down, mut age) = (String::new(), String::new(), String::new());
 
     for line in 0..height {
         let pos = view.top + line;
         queue!(out, cursor::MoveTo(0, line as u16 + 2))?;
-        match view.visible.get(pos) {
-            Some(&i) => {
-                let r = &view.rows[i];
-                let attr = if pos == view.cursor {
-                    Attribute::Reverse
-                } else {
-                    Attribute::Reset
-                };
+        let Some(&i) = view.visible.get(pos) else {
+            write_pad(out, width)?;
+            continue;
+        };
+        let r = &view.rows[i];
+        let attr = if pos == view.cursor {
+            Attribute::Reverse
+        } else {
+            Attribute::Reset
+        };
 
-                up.clear();
-                down.clear();
-                age.clear();
-                let _ = write!(up, "{}", Bytes(r.upload));
-                let _ = write!(down, "{}", Bytes(r.download));
-                match r.started {
-                    Some(s) => {
-                        let _ = write!(age, "{}", Age(now - s));
-                    }
-                    None => age.push('-'),
-                }
-
-                let rule_color = if r.rule == "final" {
-                    Color::Yellow
-                } else {
-                    Color::Reset
-                };
-                write_conn_line(
-                    out,
-                    width,
-                    &widths,
-                    attr,
-                    [
-                        (r.network.as_str(), net_color(&r.network)),
-                        (r.source.as_str(), Color::Reset),
-                        (r.dest(), Color::Blue),
-                        (r.chain.as_str(), Color::Reset),
-                        (r.rule.as_str(), rule_color),
-                        (up.as_str(), Color::Green),
-                        (down.as_str(), Color::Red),
-                        (age.as_str(), Color::Reset),
-                    ],
-                )?;
+        up.clear();
+        down.clear();
+        age.clear();
+        let _ = write!(up, "{}", Bytes(r.upload));
+        let _ = write!(down, "{}", Bytes(r.download));
+        match r.started {
+            Some(s) => {
+                let _ = write!(age, "{}", Age(now.saturating_sub(s)));
             }
-            None => write_pad(out, width)?,
+            None => age.push('-'),
         }
+
+        let rule_color = if r.rule == "final" {
+            Color::Yellow
+        } else {
+            Color::Reset
+        };
+        write_conn_line(
+            out,
+            width,
+            &widths,
+            attr,
+            [
+                (r.network.as_str(), net_color(&r.network)),
+                (r.source.as_str(), Color::Reset),
+                (r.dest(), Color::Blue),
+                (r.chain.as_str(), Color::Reset),
+                (r.rule.as_str(), rule_color),
+                (up.as_str(), Color::Green),
+                (down.as_str(), Color::Red),
+                (age.as_str(), Color::Reset),
+            ],
+        )?;
     }
 
     // details of selected connection
@@ -825,10 +923,10 @@ fn draw_connections(
         .unwrap_or_default();
     queue!(
         out,
-        cursor::MoveTo(0, rows - 2),
+        cursor::MoveTo(0, rows.saturating_sub(2)),
         SetForegroundColor(Color::Magenta),
     )?;
-    write_fit(out, &detail, width, Align::Left)?;
+    write_fit(out, &detail, width.saturating_sub(1), Align::Left)?;
     reset_term!(out)
 }
 
@@ -862,7 +960,7 @@ impl Table {
             by_name,
             selectors_of,
             visible: (0..entries.len()).collect(),
-            widths: measure(&entries),
+            widths: measure_entrys(&entries),
             entries,
         }
     }
@@ -896,16 +994,16 @@ impl Table {
         )
     }
 
-    fn set_delay_by_probe(&mut self, probe: &str, delay: Delay) {
+    fn set_delay_by_probe(&mut self, probe: &str, delay: &Delay) {
         let mut changed = false;
         for entry in &mut self.entries {
             if entry.probe_name() == probe {
-                entry.delay = delay;
+                entry.delay = delay.clone();
                 changed = true;
             }
         }
         if changed {
-            self.widths = measure(&self.entries);
+            self.widths = measure_entrys(&self.entries);
         }
     }
 
@@ -1054,13 +1152,13 @@ struct App {
     right: Pane,
     center_offset: i32,
     right_source: Option<String>,
-    delays: HashMap<String, Delay>,
+    delays: HashMap<String, VecDeque<Delay>>,
     active: Side,
     mode: Mode,
     client: Arc<Client>,
     is_sleep: bool,
     connections: ConnView,
-    show_conn_popup: bool,
+    show_conn_popup: Option<String>,
     show_popup: bool,
 }
 
@@ -1078,7 +1176,7 @@ impl App {
             client,
             is_sleep: false,
             connections: ConnView::default(),
-            show_conn_popup: false,
+            show_conn_popup: None,
             show_popup: false,
         };
         app.sync_right();
@@ -1129,15 +1227,28 @@ impl App {
     }
 
     fn apply_delay(&mut self, probe: String, delay: Delay) {
-        self.left.table.set_delay_by_probe(&probe, delay);
-        self.right.table.set_delay_by_probe(&probe, delay);
-        self.delays.insert(probe, delay);
+        if let Some(h) = self.delays.get_mut(&probe) {
+            h.push_back(delay);
+            if h.len() >= DELAY_CAP {
+                h.pop_front();
+            }
+        } else {
+            let mut h = VecDeque::with_capacity(DELAY_CAP);
+            h.push_back(delay);
+            self.delays.insert(probe.clone(), h);
+        }
+        self.left
+            .table
+            .set_delay_by_probe(&probe, self.delays[&probe].back().unwrap_or(&Delay::None));
+        self.right
+            .table
+            .set_delay_by_probe(&probe, self.delays[&probe].back().unwrap_or(&Delay::None));
     }
 
     fn apply_proxies(&mut self, mut entries: Vec<Entry>) {
         for entry in &mut entries {
-            if let Some(&delay) = self.delays.get(entry.probe_name()) {
-                entry.delay = delay;
+            if let Some(delays) = self.delays.get(entry.probe_name()) {
+                entry.delay = delays.back().unwrap_or(&Delay::None).clone();
             }
         }
 
@@ -1253,7 +1364,7 @@ impl App {
                     (e.kind.clone(), e.name.clone(), e.delay)
                 });
 
-                if let (Some((kind_l, name_l)), Some((kind_r, name_r, delay_r))) =
+                if let (Some((kind_l, name_l)), Some((kind_r, name_r, delays_r))) =
                     (selected_l, selected_r)
                 {
                     if kind_l == "Selector" {
@@ -1262,8 +1373,9 @@ impl App {
                                 if let Some(&index) = self.left.table.by_name.get(&name_l) {
                                     let entry = &mut self.left.table.entries[index];
                                     entry.now = Some(name_r);
-                                    entry.delay = delay_r;
-                                    self.left.table.widths = measure(&self.left.table.entries);
+                                    entry.delay = delays_r;
+                                    self.left.table.widths =
+                                        measure_entrys(&self.left.table.entries);
                                 }
                             }
                             Err(_) => { /* show error */ }
@@ -1274,12 +1386,14 @@ impl App {
                                 if let Some(&index) = self.right.table.by_name.get(&name_r) {
                                     let entry = &mut self.right.table.entries[index];
                                     entry.now = Some(name_l.clone());
-                                    self.right.table.widths = measure(&self.right.table.entries);
+                                    self.right.table.widths =
+                                        measure_entrys(&self.right.table.entries);
                                 }
                                 if let Some(&index) = self.left.table.by_name.get(&name_r) {
                                     let entry = &mut self.left.table.entries[index];
                                     entry.now = Some(name_l);
-                                    self.left.table.widths = measure(&self.left.table.entries);
+                                    self.left.table.widths =
+                                        measure_entrys(&self.left.table.entries);
                                 }
                             }
                             Err(_) => { /* show error */ }
@@ -1347,11 +1461,20 @@ impl App {
 
     async fn handle_connections_key(&mut self, code: KeyCode, ctrl: bool, _shift: bool) -> bool {
         let h = self.conn_height();
-        self.show_conn_popup = false;
+        self.show_conn_popup = None;
         match code {
             KeyCode::Char('q') => return true,
 
-            KeyCode::Char('o') => self.show_conn_popup = true,
+            KeyCode::Char('o') => {
+                let conn_id = self
+                    .connections
+                    .selected()
+                    .map(|i| self.connections.rows[i].id.as_str())
+                    .unwrap_or("");
+                if !conn_id.is_empty() {
+                    self.show_conn_popup = Some(conn_id.into());
+                }
+            }
             KeyCode::Char('K') => {
                 let conn_id = self
                     .connections
@@ -1450,56 +1573,57 @@ impl App {
             )?;
             return out.flush();
         }
+
         if self.conn_visible() {
             draw_connections(out, &self.connections, cols, rows, self.is_sleep)?;
             self.draw_footer(out)?;
-            if self.show_conn_popup {
-                out.flush()?;
-
-                if let Some(selected) = self.connections.selected() {
-                    let (content, title, area) = self.connections.rows[selected].popup(self.size);
-                    draw_popup(out, area, title, content, 0, Color::Cyan)?;
+            if let Some(id) = self.show_conn_popup.as_deref() {
+                match self.connections.rows.iter_mut().find(|r| r.id == id) {
+                    Some(conn) => {
+                        out.flush()?;
+                        let (content, title, area) = conn.popup(self.size);
+                        draw_popup(out, area, title, content, 0, Color::Cyan)?;
+                    }
+                    None => self.show_conn_popup = None,
                 }
             }
             return out.flush();
         }
+
         let height = self.list_height();
-
-        let half = (cols as i32) / 2 + self.center_offset;
-        let left_width = half.clamp(2, cols as i32 - 3) as u16;
-        let sep_x = left_width;
+        let sep_x = ((cols as i32) / 2 + self.center_offset).clamp(2, cols as i32 - 3) as u16;
         let right_x = sep_x + 1;
-        let right_width = cols - right_x;
 
+        reset_term!(out)?;
+        queue!(out, SetForegroundColor(Color::White))?;
         for y in 0..rows - 1 {
-            queue!(
-                out,
-                cursor::MoveTo(sep_x, y),
-                SetForegroundColor(Color::White),
-                Print('│'),
-                ResetColor
-            )?;
+            queue!(out, cursor::MoveTo(sep_x, y), Print('│'))?;
         }
+        reset_term!(out)?;
+
         draw_pane(
             out,
             &self.left,
             0,
-            left_width as usize,
+            sep_x as usize,
             height,
             self.active == Side::Left,
             self.is_sleep,
             Highlight::None,
         )?;
+
         let highlight = match self.left.selected().map(|i| &self.left.table.entries[i]) {
-            Some(e) if e.now.is_some() => Highlight::ByName(e.now.as_deref().unwrap()),
-            Some(e) => Highlight::ByNow(&e.name),
+            Some(e) => match e.now.as_deref() {
+                Some(now) => Highlight::ByName(now),
+                None => Highlight::ByNow(&e.name),
+            },
             None => Highlight::None,
         };
         draw_pane(
             out,
             &self.right,
             right_x,
-            right_width as usize,
+            (cols - right_x) as usize,
             height,
             self.active == Side::Right,
             self.is_sleep,
@@ -1508,14 +1632,15 @@ impl App {
         self.draw_footer(out)?;
 
         if self.show_popup {
-            out.flush()?;
-
             if let Some(selected) = self.active_pane().selected() {
-                let (content, title, area) = if self.active == Side::Left {
-                    self.left.table.entries[selected].popup(self.size)
-                } else {
-                    self.left.table.entries[selected].popup(self.size)
+                out.flush()?;
+                let pane = match self.active {
+                    Side::Left => &mut self.left,
+                    Side::Right => &mut self.right,
                 };
+                let entry = &mut pane.table.entries[selected];
+                let delays = self.delays.get(entry.probe_name());
+                let (content, title, area) = entry.popup(self.size, delays);
                 draw_popup(out, area, title, content, 0, Color::Cyan)?;
             }
         }
@@ -1540,7 +1665,7 @@ impl App {
                 let text = format!(" /{}", filter);
                 let caret = text.width().min(usize::from(cols) - 1) as u16;
                 queue!(out, cursor::MoveTo(0, rows - 1))?;
-                write_fit(out, &text, usize::from(cols), Align::Left)?;
+                write_fit(out, &text, cols as usize, Align::Left)?;
                 queue!(out, cursor::MoveTo(caret, rows - 1), cursor::Show)
             }
             Mode::Normal | Mode::Connections => {
@@ -1554,7 +1679,7 @@ impl App {
                 } else {
                     HINT
                 };
-                write_fit(out, hint, usize::from(cols), Align::Left)
+                write_fit(out, hint, cols as usize, Align::Left)
             }
         }
     }
@@ -1568,10 +1693,7 @@ pub fn draw_popup(
     scroll: usize,
     border: Color,
 ) -> io::Result<()> {
-    const SPACES: &str = "                                                                ";
-    fn spaces(n: usize) -> &'static str {
-        &SPACES[..n.min(SPACES.len())]
-    }
+    const HLINE: &str = "──────────────────────────────────────────────────────────────────────────────────────────────────────";
     let (x, y, w, h) = area;
     if w < 3 || h < 3 {
         return Ok(());
@@ -1583,20 +1705,26 @@ pub fn draw_popup(
         cursor::MoveTo(x, y),
         SetForegroundColor(border),
         Print('┌'),
-        Print("─".repeat(inner_w)),
+        Print(&HLINE[..inner_w.min(HLINE.len() / 3) * 3]),
         Print('┐'),
         ResetColor,
     )?;
     if !title.is_empty() {
-        let t: String = title.chars().take(inner_w).collect();
         queue!(
             out,
             cursor::MoveTo(x + 1, y),
             SetAttribute(Attribute::Reverse),
             SetAttribute(Attribute::Bold),
-            Print(&t),
-            SetAttribute(Attribute::Reset),
         )?;
+        let mut printed = 0usize;
+        for ch in title.chars().take(inner_w) {
+            queue!(out, Print(ch))?;
+            printed += 1;
+        }
+        if printed < inner_w {
+            write_pad(out, inner_w - printed)?;
+        }
+        queue!(out, SetAttribute(Attribute::Reset))?;
     }
     for row in 0..inner_h {
         let cy = y + 1 + row as u16;
@@ -1606,21 +1734,25 @@ pub fn draw_popup(
             SetForegroundColor(border),
             Print('│'),
             ResetColor,
+            cursor::MoveTo(x + 1, cy),
         )?;
-        let idx = scroll + row;
-        if let Some(line) = lines.get(idx) {
-            let n = line.chars().count();
-            if n <= inner_w {
-                queue!(out, cursor::MoveTo(x + 1, cy), Print(line))?;
-                if n < inner_w {
-                    queue!(out, Print(spaces(inner_w - n)))?;
+        match lines.get(scroll + row) {
+            Some(line) => {
+                let mut n = 0usize;
+                for ch in line.chars() {
+                    if n >= inner_w {
+                        break;
+                    }
+                    queue!(out, Print(ch))?;
+                    n += 1;
                 }
-            } else {
-                let text: String = line.chars().take(inner_w).collect();
-                queue!(out, cursor::MoveTo(x + 1, cy), Print(&text))?;
+                if n < inner_w {
+                    write_pad(out, inner_w - n)?;
+                }
             }
-        } else {
-            queue!(out, cursor::MoveTo(x + 1, cy), Print(spaces(inner_w)))?;
+            None => {
+                write_pad(out, inner_w)?;
+            }
         }
         queue!(
             out,
@@ -1635,7 +1767,7 @@ pub fn draw_popup(
         cursor::MoveTo(x, y + h - 1),
         SetForegroundColor(border),
         Print('└'),
-        Print("─".repeat(inner_w)),
+        Print(&HLINE[..inner_w.min(HLINE.len() / 3) * 3]),
         Print('┘'),
         ResetColor,
     )
@@ -1736,10 +1868,8 @@ fn draw_pane(
     } else {
         format!(" /{}", pane.filter)
     };
-    let used = title_width + counter.width();
-    let rest = width.saturating_sub(used);
+    let rest = width.saturating_sub(title_width + counter.width());
     let filter_width = filter_raw.width().min(rest);
-    let pad_width = rest.saturating_sub(filter_width);
 
     queue!(out, cursor::MoveTo(x, 0))?;
     if active {
@@ -1759,21 +1889,28 @@ fn draw_pane(
     write_fit(out, &title_raw, title_width, Align::Left)?;
     reset_term!(out)?;
 
-    queue!(out, SetAttribute(Attribute::Underlined))?;
-    queue!(out, SetForegroundColor(Color::Yellow))?;
+    // filter + padding
+    queue!(
+        out,
+        SetAttribute(Attribute::Underlined),
+        SetForegroundColor(Color::Yellow),
+    )?;
     write_fit(out, &filter_raw, filter_width, Align::Left)?;
-    if pad_width > 0 {
-        write_pad(out, pad_width)?;
-    }
-    queue!(out, ResetColor)?;
+    write_pad(out, rest - filter_width)?;
 
     // counter
-    queue!(out, SetForegroundColor(Color::White))?;
-    queue!(out, SetAttribute(Attribute::Underlined))?;
-    queue!(out, Print(counter.as_str()))?;
+    queue!(
+        out,
+        ResetColor,
+        SetForegroundColor(Color::White),
+        Print(&counter),
+    )?;
     reset_term!(out)?;
 
+    // header
     let widths = pane.table.layout(width);
+    let tail = width.saturating_sub(1 + widths.iter().sum::<usize>() + GAP.len() * (COLUMNS - 1));
+
     queue!(out, cursor::MoveTo(x, 1))?;
     write_line(
         out,
@@ -1781,12 +1918,10 @@ fn draw_pane(
         Attribute::Bold,
         HEADERS.map(|header| (header, Color::White)),
     )?;
-    let used = 1 + widths.iter().sum::<usize>() + GAP.len() * (COLUMNS - 1);
-    if used < width {
-        write_pad(out, width - used)?;
-    }
+    write_pad(out, tail)?;
     reset_term!(out)?;
 
+    // rows
     for line in 0..height {
         let position = pane.top + line;
         queue!(out, cursor::MoveTo(x, line as u16 + 2))?;
@@ -1798,12 +1933,9 @@ fn draw_pane(
                     _ => Attribute::Reset,
                 };
                 write_entry(out, &widths, attr, &pane.table.entries[index], highlight)?;
-                let used = 1 + widths.iter().sum::<usize>() + GAP.len() * (COLUMNS - 1);
-                if used < width {
-                    write_pad(out, width - used)?;
-                }
+                write_pad(out, tail)?;
             }
-            None => queue!(out, Print(" ".repeat(width)))?,
+            None => write_pad(out, width)?,
         }
     }
     reset_term!(out)
@@ -1874,9 +2006,9 @@ fn spawn_connections_poller(
     tokio::spawn(async move {
         loop {
             let period = if *conns_open_rx.borrow() {
-                Duration::from_secs(1)
+                CONNECTIONS_REFRESH_INTERVAL
             } else {
-                CONNECTIONS_REFRESH_BACKGROUND
+                BACKGROUND_CONNECTIONS_REFRESH_INTERVAL
             };
             let sleep = time::sleep(period);
             tokio::pin!(sleep);
@@ -1903,8 +2035,8 @@ fn spawn_proxies_poller(
     mut active_rx: watch::Receiver<bool>,
 ) {
     tokio::spawn(async move {
-        let start = Instant::now() + PROXIES_REFRESH;
-        let mut tick = time::interval_at(start, PROXIES_REFRESH);
+        let start = Instant::now() + PROXIES_REFRESH_INTERVAL;
+        let mut tick = time::interval_at(start, PROXIES_REFRESH_INTERVAL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
@@ -1946,7 +2078,7 @@ async fn probe_all(
                     ms: d.as_millis().min(u128::from(u16::MAX)) as u16,
                     at: Instant::now(),
                 },
-                Err(_) => Delay::Fail,
+                Err(_) => Delay::Fail { at: Instant::now() },
             };
             let _ = tx.send(Msg::Delay { probe, delay });
         });
@@ -1964,15 +2096,15 @@ fn spawn_delay_prober(
     timeout: Duration,
 ) {
     tokio::spawn(async move {
-        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_PROBES));
+        let semaphore = Arc::new(Semaphore::new(DELAY_MAX_CONCURRENT_PROBES));
         let mut last_probe: Option<Instant> = None;
 
         loop {
             if let Some(last) = last_probe {
                 let period = if *conns_open_rx.borrow() {
-                    DELAY_INTERVAL_CONNECTIONS
+                    BACKGROUNG_PROXY_DELAY_INTERVAL
                 } else {
-                    DELAY_INTERVAL
+                    PROXY_DELAY_INTERVAL
                 };
                 let sleep = time::sleep_until(last + period);
                 tokio::pin!(sleep);

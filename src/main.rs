@@ -90,17 +90,17 @@ fn main() -> Result<()> {
         || args.flush_dns_cache
         || args.upgrade_ui;
 
+    // No API commands: exit without initializing Tokio
+    if !has_api_cmd {
+        return Ok(());
+    }
+
     if !args.select.is_empty() || !args.select_random.is_empty() {
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         fastrand::seed(seed);
-    }
-
-    // No API commands: exit without initializing Tokio
-    if !has_api_cmd {
-        return Ok(());
     }
 
     let rt = tokio::runtime::Builder::new_current_thread()

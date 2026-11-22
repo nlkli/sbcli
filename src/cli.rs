@@ -26,6 +26,7 @@ pub struct Args {
     /// `(group, member)`
     pub select: Vec<(String, String)>,
     pub select_random: Vec<String>,
+    // pub select_best: Vec<String>,
 
     pub rules: bool,
     pub connections: bool,
@@ -223,7 +224,6 @@ Proxies
   -P, --proxies                     List proxies
   -p, --proxy <NAME>                Show a proxy
   -s, --select <GROUP> <NAME>       Select a group member
-  -S, --select-rand <GROUP>         Select a random group member
   -d, --proxy-delay <NAME>          Test a proxy delay
 Groups
   -G, --groups                      List groups

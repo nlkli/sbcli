@@ -7,7 +7,7 @@ A small, fast command-line client for the [sing-box](https://github.com/SagerNet
 ## Features
 
 - Inspect and control proxies, groups, rules and connections
-- Select group members (manually or randomly) and test proxy/group delay
+- Select group members and test proxy/group delay
 - Convert proxy links to sing-box outbounds and back
 - Interactive TUI: switch proxies, live delay and connection monitoring, close connections, filter tables
 
@@ -65,7 +65,6 @@ Proxies
   -P, --proxies                     List proxies
   -p, --proxy <NAME>                Show a proxy
   -s, --select <GROUP> <NAME>       Select a group member
-  -S, --select-rand <GROUP>         Select a random group member
   -d, --proxy-delay <NAME>          Test a proxy delay
 Groups
   -G, --groups                      List groups
