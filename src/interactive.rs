@@ -32,7 +32,7 @@ const ALIGNS: [Align; COLUMNS] = [
     Align::Right,
 ];
 const DELAY_CAP: usize = 24;
-const DELAY_STALE_AFTER: Duration = Duration::from_secs(15);
+const DELAY_STALE_AFTER: Duration = Duration::from_secs(60);
 const HINT: &str =
     " Enter select | c conns | / filter | esc clear | h/j/k/l move | o open | q quit";
 const CONN_COLS: usize = 8;
@@ -63,7 +63,7 @@ const BACKGROUNG_PROXY_DELAY_INTERVAL: Duration = Duration::from_secs(14);
 const PROXIES_REFRESH_INTERVAL: Duration = Duration::from_secs(21);
 const CONNECTIONS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const BACKGROUND_CONNECTIONS_REFRESH_INTERVAL: Duration = Duration::from_secs(14);
-const DELAY_MAX_CONCURRENT_PROBES: usize = 50;
+const DELAY_MAX_CONCURRENT_PROBES: usize = 100;
 
 const SLEEP_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -840,7 +840,7 @@ fn draw_connections(
         SetAttribute(Attribute::Underlined),
         SetForegroundColor(Color::Yellow),
     )?;
-    write_fit(out, &filter_raw, filter_w.saturating_sub(1), Align::Left)?;
+    write_fit(out, &filter_raw, filter_w, Align::Left)?;
     write_pad(out, rest - filter_w)?;
     queue!(
         out,
