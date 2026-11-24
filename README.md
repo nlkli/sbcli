@@ -72,8 +72,6 @@ sbcli -a http://127.0.0.1:9090 -T <TOKEN> -i
 - **Закрытие соединений**: одного или всех сразу
 - **Фильтр**: введите строку, чтобы отфильтровать любую таблицу
 
-Работает и с большими конфигурациями (800+ outbound-ов):
-
 ![server-interactive-demo-gif](https://github.com/nlkli/assetsrepo/blob/main/sbcli.demo/server-interactive-demo.gif)
 
 ### Все опции

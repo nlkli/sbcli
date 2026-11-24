@@ -72,8 +72,6 @@ A terminal UI for managing sing-box without retyping commands:
 - **Close connections**: drop one or all
 - **Filter**: type to narrow down any table
 
-Works with large setups too (800+ outbounds):
-
 ![server-interactive-demo-gif](https://github.com/nlkli/assetsrepo/blob/main/sbcli.demo/server-interactive-demo.gif)
 
 ### All options
