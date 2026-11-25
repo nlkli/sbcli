@@ -4,9 +4,11 @@
 
 A small, fast command-line client for the [sing-box](https://github.com/SagerNet/sing-box) Clash API, with a built-in converter between proxy share links and sing-box outbounds.
 
+![interactive-demo-gif](https://github.com/nlkli/assetsrepo/blob/main/sbcli.demo/interactive-demo.gif)
+
 Tested with **sing-box 1.14.4**.
 
-![interactive-demo-gif](https://github.com/nlkli/assetsrepo/blob/main/sbcli.demo/interactive-demo.gif)
+The Clash API functionality should work on any clients who declare support for this API. For example [shoes](https://shoes-rs.github.io/routing/clash-controller). The outbound link and configuration converter was written specifically for sing-box.
 
 ## Features
 

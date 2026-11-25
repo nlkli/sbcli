@@ -4,9 +4,11 @@
 
 Небольшой быстрый консольный клиент для Clash API [sing-box](https://github.com/SagerNet/sing-box) со встроенным конвертером между ссылками на прокси и outbound-ами sing-box.
 
+![interactive-demo-gif](https://github.com/nlkli/assetsrepo/blob/main/sbcli.demo/interactive-demo.gif)
+
 Проверено на **sing-box 1.14.4**.
 
-![interactive-demo-gif](https://github.com/nlkli/assetsrepo/blob/main/sbcli.demo/interactive-demo.gif)
+Clash API функционал должен работать на любых клиентах кто заявляет поддержку этого API. Например [shoes](https://shoes-rs.github.io/routing/clash-controller). Конвертер ссылок и конфигурации outbound был написан конкретно под sing-box.
 
 ## Возможности
 
