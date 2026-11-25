@@ -1,36 +1,36 @@
 # sbcli
 
-Русский | [English](README.en.md)
+English | [Русский](README.ru.md)
 
-Небольшой быстрый консольный клиент для Clash API [sing-box](https://github.com/SagerNet/sing-box) со встроенным конвертером между ссылками на прокси и outbound-ами sing-box.
+A small, fast command-line client for the [sing-box](https://github.com/SagerNet/sing-box) Clash API, with a built-in converter between proxy share links and sing-box outbounds.
 
 ![interactive-demo-gif](https://github.com/nlkli/assetsrepo/blob/main/sbcli.demo/interactive-demo.gif)
 
-Проверено на **sing-box 1.14.4**.
+Tested with **sing-box 1.14.4**.
 
-Clash API функционал должен работать на любых клиентах кто заявляет поддержку этого API. Например [shoes](https://shoes-rs.github.io/routing/clash-controller). Конвертер ссылок и конфигурации outbound был написан конкретно под sing-box.
+The Clash API functionality should work on any clients who declare support for this API. For example [shoes](https://shoes-rs.github.io/routing/clash-controller). The outbound link and configuration converter was written specifically for sing-box.
 
-## Возможности
+## Features
 
-- Просмотр и управление прокси, группами, правилами и соединениями
-- Выбор активного прокси в группе, проверка задержки прокси и групп
-- Конвертация ссылок в outbound-ы sing-box и обратно
-- Интерактивный TUI: переключение прокси, задержка и соединения в реальном времени, закрытие соединений, фильтрация таблиц
+- Inspect and control proxies, groups, rules and connections
+- Select group members, test proxy and group delay
+- Convert proxy links to sing-box outbounds and back
+- Interactive TUI: switch proxies, live delay and connection monitoring, close connections, filter tables
 
-## Установка
+## Install
 
-**Homebrew** ([формула](https://github.com/nlkli/homebrew-tap/blob/main/Formula/sbcli.rb))
+**Homebrew** ([formula](https://github.com/nlkli/homebrew-tap/blob/main/Formula/sbcli.rb))
 
 ```sh
 brew install nlkli/tap/sbcli
 ```
 
-**Готовые релизы**
+**Download a release**
 
 - [macOS (Apple Silicon)](https://github.com/nlkli/sbcli/releases/latest/download/sbcli-macos-arm64.zip)
 - [Linux (x86_64)](https://github.com/nlkli/sbcli/releases/latest/download/sbcli-linux-amd64.zip)
 
-**Сборка из исходников**
+**Build from source**
 
 ```sh
 git clone https://github.com/nlkli/sbcli
@@ -38,9 +38,9 @@ cd sbcli
 cargo b -r && ./target/release/sbcli -h
 ```
 
-## Использование
+## Usage
 
-sbcli работает с sing-box через [Clash API](https://sing-box.sagernet.org/configuration/experimental/clash-api/) (доступен с sing-box 1.8.0). Сначала включите его в конфиге sing-box:
+sbcli talks to sing-box through its [Clash API](https://sing-box.sagernet.org/configuration/experimental/clash-api/) (available since sing-box 1.8.0). Enable it in your sing-box config first:
 
 ```json
 {
@@ -52,33 +52,33 @@ sbcli работает с sing-box через [Clash API](https://sing-box.sager
 }
 ```
 
-| Опция | Описание |
+| Option | Description |
 |---|---|
-| `-a, --api <URL>` | Адрес контроллера (переменная `SINGBOX_CLASH_API`, по умолчанию `http://127.0.0.1:9090`) |
-| `-T, --token <TOKEN>` | Bearer-токен, если в конфиге задан `secret` |
+| `-a, --api <URL>` | Controller URL (env `SINGBOX_CLASH_API`, default `http://127.0.0.1:9090`) |
+| `-T, --token <TOKEN>` | Bearer token, if you set a `secret` in the config |
 
-Если sing-box запущен локально на адресе по умолчанию `http://127.0.0.1:9090` и без `secret`, указывать ничего не нужно.
+If sing-box runs locally on the default `http://127.0.0.1:9090` and has no `secret`, you don't need to pass any of these.
 
-### Интерактивный режим
+### Interactive mode
 
 ```sh
 sbcli -i
 sbcli -a http://127.0.0.1:9090 -T <TOKEN> -i
 ```
 
-Терминальный интерфейс, чтобы не вводить команды вручную:
+A terminal UI for managing sing-box without retyping commands:
 
-- **Переключение прокси**: выбор активного элемента любой selector-группы
-- **Задержка в реальном времени**: пинг прокси и групп обновляется на лету
-- **Соединения в реальном времени**: видно, как они открываются и закрываются
-- **Закрытие соединений**: одного или всех сразу
-- **Фильтр**: введите строку, чтобы отфильтровать любую таблицу
+- **Switch proxies**: pick the active member of any selector group
+- **Live delay**: watch proxy and group latency in real time
+- **Live connections**: follow connections as they open and close
+- **Close connections**: drop one or all
+- **Filter**: type to narrow down any table
 
 ![server-interactive-demo-gif](https://github.com/nlkli/assetsrepo/blob/main/sbcli.demo/server-interactive-demo.gif)
 
-### Все опции
+### All options
 
-Короткие флаги можно объединять, например `-lZ`.
+Short flags can be combined, e.g. `-lZ`.
 
 ```text
 Proxies
@@ -109,9 +109,9 @@ Link converter
   -o, --output <DST>                Output file for the preceding -l/-L
 ```
 
-### Примеры
+### Examples
 
-Показать группу:
+Show a group:
 
 ```sh
 $ sbcli -g proxy
@@ -128,33 +128,33 @@ $ sbcli -g proxy
 }
 ```
 
-Переключить группу `out`:
+Switch the `out` group between members:
 
 ```sh
 sbcli -s out direct
 sbcli -s out proxy
 ```
 
-Конвертировать ссылки в outbound-ы со случайными UUID вместо тегов и сохранить в файл:
+Convert links to outbounds with random UUID tags, saved to a file:
 
 ```sh
 sbcli -lZ links.txt -o outbounds.json
 ```
 
-Конвертировать outbound-ы обратно в ссылки:
+Convert outbounds back to links:
 
 ```sh
 sbcli -L outbounds.json -o links.txt
 ```
 
-## Гайд: TUN-клиент
+## TUN client guide
 
-Полная настройка: ваши ссылки, sing-box в режиме TUN и sbcli для управления.
-Документация: [конфигурация sing-box](https://sing-box.sagernet.org/configuration/) · [TUN inbound](https://sing-box.sagernet.org/configuration/inbound/tun/)
+A full setup: your links, sing-box in TUN mode, sbcli on top.
+Docs: [sing-box configuration](https://sing-box.sagernet.org/configuration/) · [TUN inbound](https://sing-box.sagernet.org/configuration/inbound/tun/)
 
-### 1. Подготовьте ссылки
+### 1. Prepare links
 
-Сохраните ссылки в `links.txt`, по одной на строку. Часть после `#` станет тегом outbound-а.
+Save one link per line to `links.txt`. The part after `#` becomes the outbound tag.
 
 ```
 vless://b831381d-6324-4d53-ad4f-8cda48b30811@203.0.113.10:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.example.com&fp=chrome&pbk=7xhH4b_VkliBxGulljcyPOH-bYUA2dl-XAdZAsfhk04&sid=6ba85179e30d4fc2&type=tcp#node-vless
@@ -163,18 +163,18 @@ ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@203.0.113.12:8388#node-ss
 trojan://mypassword@203.0.113.13:443?sni=www.example.com#node-trojan
 ```
 
-### 2. Сконвертируйте в outbound-ы
+### 2. Convert to outbounds
 
-sbcli выводит JSON-массив, а sing-box ожидает объект с ключом `outbounds`. Оберните вывод через `jq`:
+sbcli prints a JSON array, but sing-box expects an object with an `outbounds` key. Wrap it with `jq`:
 
 ```sh
 mkdir -p conf
 sbcli -l links.txt | jq '{outbounds: .}' > conf/01-outbounds.json
 ```
 
-### 3. Добавьте конфиг TUN
+### 3. Add the TUN config
 
-Сохраните как `conf/02-config.json`. В селекторе `proxy` должны быть теги из ваших ссылок.
+Save as `conf/02-config.json`. The `proxy` selector must list the tags from your links.
 
 ```json
 {
@@ -253,33 +253,33 @@ sbcli -l links.txt | jq '{outbounds: .}' > conf/01-outbounds.json
 }
 ```
 
-Этот конфиг отправляет домены `.ru`, `.su` и `.рф` напрямую, а всё остальное через прокси. При необходимости поменяйте суффиксы и DNS-сервер `local` под свой регион.
+This config sends `.ru`, `.su` and `.рф` domains directly and everything else through the proxy. Adjust the suffixes and the `local` DNS server for your region.
 
-Нужен готовый вариант? Возьмите [мой личный конфиг для России](https://github.com/nlkli/dotfiles/blob/main/config/sing-box.json) и замените теги в селекторе `proxy` на теги из ваших ссылок.
+Prefer a ready-made setup? Take [my personal config for Russia](https://github.com/nlkli/dotfiles/blob/main/config/sing-box.json) and replace the tags in the `proxy` selector with the tags from your links.
 
-### 4. Запустите
+### 4. Run
 
-`-C` загружает и объединяет все JSON-файлы из каталога:
+`-C` loads and merges all JSON files in the directory:
 
 ```sh
 sudo sing-box run -C conf
 ```
 
-### 5. Управляйте через sbcli
+### 5. Control with sbcli
 
 ```sh
-sbcli -g proxy               # показать группу
-sbcli -s proxy node-hy2      # выбрать outbound
-sbcli -s out direct          # напрямую, без прокси
-sbcli -s out proxy           # через прокси
-sbcli -i                     # интерактивный режим
+sbcli -g proxy               # show the group
+sbcli -s proxy node-hy2      # pick an outbound
+sbcli -s out direct          # bypass the proxy
+sbcli -s out proxy           # route through the proxy
+sbcli -i                     # interactive mode
 ```
 
-### DNS: если что-то не работает
+### DNS troubleshooting
 
-Если сайты не открываются или DNS утекает, проверьте системный DNS. Он **не должен указывать на роутер** (например, `192.168.1.1`). Адрес роутера локальный, поэтому такие запросы идут мимо туннеля и sing-box их не видит. Укажите вместо него публичный DNS (например, `1.1.1.1`): запросы пойдут через интерфейс TUN, где sing-box перехватит их и обработает по вашим DNS-правилам.
+If sites don't load or DNS leaks, check your system DNS. It **must not point to your router** (e.g. `192.168.1.1`). Router addresses are local, so those queries skip the tunnel and sing-box never sees them. Set a public DNS server instead (e.g. `1.1.1.1`): its queries go through the TUN interface, where sing-box intercepts and routes them by your DNS rules.
 
-На macOS (замените `Wi-Fi` на имя вашего сетевого сервиса, список: `networksetup -listallnetworkservices`):
+On macOS (replace `Wi-Fi` with your network service, see `networksetup -listallnetworkservices`):
 
 ```sh
 macos-dns-set() {
@@ -293,11 +293,11 @@ macos-dns-clear() {
 }
 ```
 
-Запустите `macos-dns-set` перед подключением, а `macos-dns-clear` вернёт DNS по умолчанию (от роутера).
+Run `macos-dns-set` before connecting, and `macos-dns-clear` to go back to the default (router) DNS.
 
-## Конфигурация
+## Configuration
 
-- `SINGBOX_CLASH_API`: адрес контроллера по умолчанию, если не указан `-a`.
+- `SINGBOX_CLASH_API`: default controller URL when `-a` is not given.
 
 ---
 
