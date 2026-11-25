@@ -17,6 +17,8 @@ Clash API функционал должен работать на любых к�
 - Конвертация ссылок в outbound-ы sing-box и обратно
 - Интерактивный TUI: переключение прокси, задержка и соединения в реальном времени, закрытие соединений, фильтрация таблиц
 
+Поддерживается парсинг share-ссылок для всех основных протоколов. Актуальный список - в [`src/link/mod.rs`](https://github.com/nlkli/sbcli/blob/main/src/link/mod.rs).
+
 ## Установка
 
 **Homebrew** ([формула](https://github.com/nlkli/homebrew-tap/blob/main/Formula/sbcli.rb))

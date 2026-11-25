@@ -17,6 +17,8 @@ The Clash API functionality should work on any clients who declare support for t
 - Convert proxy links to sing-box outbounds and back
 - Interactive TUI: switch proxies, live delay and connection monitoring, close connections, filter tables
 
+Share link parsing is supported for all major protocols. For the exact list, see [`src/link/mod.rs`](https://github.com/nlkli/sbcli/blob/main/src/link/mod.rs).
+
 ## Install
 
 **Homebrew** ([formula](https://github.com/nlkli/homebrew-tap/blob/main/Formula/sbcli.rb))
